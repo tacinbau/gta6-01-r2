@@ -1,44 +1,42 @@
-# Azura Bay
-
+[![Competition](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
 [![Rank](https://make.fun/badge/gta6-01/tacinbau/gta6-01-r2/rank.svg)](https://make.fun/bounty/gta6-01)
 [![Reward](https://make.fun/badge/gta6-01/tacinbau/gta6-01-r2/reward.svg)](https://make.fun/bounty/gta6-01)
-[![make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
 
-An open-world crime game in the spirit of GTA 6, built for the make.fun gta6-01 bounty.
-A sun-soaked invented island city — never Vice City, never Liberty City — explored on foot
-and by car, with traffic, pedestrians, a wanted level, police who chase, ram, roadblock and
-send a helicopter, and eight story missions from the fixer Abuela Cleo.
+# Azura Bay — Open-World Crime (GTA 6 bounty)
 
-## The game
+A playable 3D open-world crime game in the browser, built on vendored Three.js.
+Explore Azura Bay on foot and by car: five districts, traffic and pedestrians,
+a wanted level with KPD cruisers and the Air One heli, 8 story missions, combat,
+a full HUD with a live minimap, a garage, radio stations, and saves.
 
-- **Azura Bay**: five districts (Old Town, The Hills, Downtown, The Docks, Marina) with
-  standing 0–5 that earns garage discounts.
-- **Eight missions**: errand, car theft, lose-the-tail, a 3-lap street race against a ghost
-  coupe, a bank vault hold, a convoy rescue, a smuggling run, and the final casino score.
-- **Crew**: Rook (+12% top speed) and Vera (heat cools faster, roadblocks held back),
-  recruited through the story.
-- **Wanted 0–5 stars**: cruisers chase and ram, roadblocks at 3 stars, Air One helicopter
-  with a spotlight at 4 stars. Busted or wasted costs $200 at the hospital.
-- **Three weapon slots** (fists, pistol, SMG) with mouse aim; **five garage cars** plus
-  engine, tire and armor upgrades; **localStorage saves**; **three procedural WebAudio
-  radio stations** plus engine hum.
-- **HUD** with minimap, wanted stars, mission banner and countdown, and an objective arrow.
+## Play
 
-## Controls
+Serve `game/` and open `index.html` (or `node serve.ts`, then
+http://localhost:8080). No network at runtime — every file is local.
 
-WASD drive / walk — E enter a car — mouse to aim, click to shoot — 1-3 weapons —
-R radio — G garage (near the garage) — P pause.
+- **WASD** drive / walk, **Shift** run, **E** enter / steal a car, **Click** shoot
+- **1-3** weapons, **R** radio station, **G** garage repair, **X** quick fix,
+  **Z/X/C** crew abilities, **P** pause
 
-## Verification
+## The city
 
-- `?selftest=1` runs nine headless checks: city builds, traffic and pedestrians spawn,
-  600 steps clean, a mission starts and advances, police spawn at heat, the renderer paints,
-  and the save/load round-trips.
-- Four staged screenshots (`shots.json`, seed 7): the Vault mission with a police chase,
-  a dusk drive through the Marina, Lose the Tail, and a night chase under Air One.
-- Two program runs produce byte-identical output (deterministic seeded RNG throughout).
+- **Old Pasaru** — stilt houses and the night market (35+ people, 20 stalls)
+- **Kumala Strand** — beach boulevard chase with palms, bus and traffic
+- **Downtown** — glass towers, the BANK, shops and traffic lights
+- **Port Meridian** — docks, warehouses, cranes
+- **Hillcrest** — houses over the bay
 
-## Tech
+## Structure
 
-Vanilla JavaScript, 2D canvas, no libraries, no network. `main.ts` hands the game in with
-the kit's `vendor/makefun-game.ts` dossier builder. Serve locally with `node serve.ts`.
+- `game/src/world.js` — deterministic city sim (buildings, traffic, peds, police, heli)
+- `game/src/render.js` — Three.js scene, chase camera, sky, shadows
+- `game/src/hud.js` — mission card, KPD response, money/stars, minimap, dialogue
+- `game/src/missions.js` — 8 missions and progression
+- `game/src/police.js` — wanted stars, responding units, roadblocks
+- `game/src/audio.js` — three procedural radio stations (WebAudio, no files)
+- `game/src/shots.js` — staged screenshot scenes + 12-point self-test
+- `game/src/main.js` — boot, game loop, driving/walking, car theft
+- `main.ts` — hands the game in (`MAKEFUN_OUTPUT_DIR=out node main.ts`)
+
+Three.js r160 is vendored as `game/vendor/three.module.min.js` (allowed by the
+competition rules); the game loads it through an import map and nothing else.
