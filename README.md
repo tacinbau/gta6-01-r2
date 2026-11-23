@@ -1,59 +1,44 @@
 # Azura Bay
 
-[![make.fun · gta6-01](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
-[![rank](https://make.fun/badge/gta6-01/tacinbau/gta6-01-r2/rank.svg)](https://make.fun/bounty/gta6-01)
-[![reward](https://make.fun/badge/gta6-01/tacinbau/gta6-01-r2/reward.svg)](https://make.fun/bounty/gta6-01)
+[![Rank](https://make.fun/badge/gta6-01/tacinbau/gta6-01-r2/rank.svg)](https://make.fun/bounty/gta6-01)
+[![Reward](https://make.fun/badge/gta6-01/tacinbau/gta6-01-r2/reward.svg)](https://make.fun/bounty/gta6-01)
+[![make.fun](https://make.fun/badge/gta6-01.svg)](https://make.fun/bounty/gta6-01)
 
-An open-world crime story on an invented island city. You are a new face in
-Azura Bay, and Abuela Cleo has eight jobs for you — deliveries, a car theft,
-a street race, a vault, a rescue, a smuggling run and the final casino score.
-Drive, steal, run, survive.
+An open-world crime game in the spirit of GTA 6, built for the make.fun gta6-01 bounty.
+A sun-soaked invented island city — never Vice City, never Liberty City — explored on foot
+and by car, with traffic, pedestrians, a wanted level, police who chase, ram, roadblock and
+send a helicopter, and eight story missions from the fixer Abuela Cleo.
 
-A complete original game in plain HTML5 Canvas and vanilla JavaScript (ES
-modules, no libraries, no network). Not affiliated with any other game or
-studio.
+## The game
 
-## The city
+- **Azura Bay**: five districts (Old Town, The Hills, Downtown, The Docks, Marina) with
+  standing 0–5 that earns garage discounts.
+- **Eight missions**: errand, car theft, lose-the-tail, a 3-lap street race against a ghost
+  coupe, a bank vault hold, a convoy rescue, a smuggling run, and the final casino score.
+- **Crew**: Rook (+12% top speed) and Vera (heat cools faster, roadblocks held back),
+  recruited through the story.
+- **Wanted 0–5 stars**: cruisers chase and ram, roadblocks at 3 stars, Air One helicopter
+  with a spotlight at 4 stars. Busted or wasted costs $200 at the hospital.
+- **Three weapon slots** (fists, pistol, SMG) with mouse aim; **five garage cars** plus
+  engine, tire and armor upgrades; **localStorage saves**; **three procedural WebAudio
+  radio stations** plus engine hum.
+- **HUD** with minimap, wanted stars, mission banner and countdown, and an objective arrow.
 
-Five districts with their own standing: Old Town, The Hills, Downtown, The
-Docks and the Marina — a seeded road grid, traffic, pedestrians, a beach,
-street lamps and landmarks from Cleo's Garage to Casino Solmar.
+## Controls
 
-## Systems
+WASD drive / walk — E enter a car — mouse to aim, click to shoot — 1-3 weapons —
+R radio — G garage (near the garage) — P pause.
 
-- **On foot and by car** — walk, sprint, steal any parked car (E), arcade
-  driving with five car models in the garage.
-- **Wanted 0–5 stars** — police cruisers chase and ram, roadblocks at 3
-  stars, the Air One helicopter at 4. Heat cools when you stay out of sight.
-- **Crew** — Rook the getaway driver (+12% top speed) and Vera the hacker
-  (heat cools 40% faster); recruit them through the story.
-- **District standing** — each finished job raises standing in its
-  district and earns garage discounts.
-- **Combat** — fists, pistol and SMG (1/2/3), mouse aim, ammo to buy.
-- **Garage** — buy cars, upgrade engine / tires / armor, save your ride.
-- **Save** — F saves to localStorage; continue from the title screen.
-- **Radio** — three procedural synth stations (R), all WebAudio, no files.
-- **HUD + minimap** — cash, health, wanted stars, weapon slots, mission
-  banner with a countdown, objective arrow and a live minimap.
+## Verification
 
-## How to play
+- `?selftest=1` runs nine headless checks: city builds, traffic and pedestrians spawn,
+  600 steps clean, a mission starts and advances, police spawn at heat, the renderer paints,
+  and the save/load round-trips.
+- Four staged screenshots (`shots.json`, seed 7): the Vault mission with a police chase,
+  a dusk drive through the Marina, Lose the Tail, and a night chase under Air One.
+- Two program runs produce byte-identical output (deterministic seeded RNG throughout).
 
-| Key | Action |
-| --- | --- |
-| W A S D / Arrows | Walk / drive |
-| Shift | Sprint on foot |
-| E | Enter / steal a car, exit a car |
-| J | Jobs list (press 1–8 to start the next job) |
-| Mouse | Aim · Click — shoot |
-| 1 / 2 / 3 | Fists / pistol / SMG (buys the weapon if you lack it) |
-| G | Garage (near Cleo's) · Tab — crew |
-| R | Radio · F — save · P — pause |
+## Tech
 
-Get busted or wasted and you wake up at Azura General, $200 lighter.
-Finish all eight jobs to pull the Azura Job and beat the game.
-
-## Run it
-
-```sh
-node serve.ts   # http://localhost:8080
-```
+Vanilla JavaScript, 2D canvas, no libraries, no network. `main.ts` hands the game in with
+the kit's `vendor/makefun-game.ts` dossier builder. Serve locally with `node serve.ts`.
