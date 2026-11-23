@@ -1,99 +1,25 @@
-// Keyboard and mouse input. Held keys give a drive/walk direction; one-shot presses (enter
-// a car, change weapon, radio, pause, confirm) are queued as bit flags and taken once by the
-// loop, so a press between two frames is never lost and never counted twice. The mouse aims:
-// the pointer's screen position is read every frame and turned into a world aim point.
-export const ACTION_ENTER = 1;
-export const ACTION_WEAPON = 2;
-export const ACTION_RADIO = 4;
-export const ACTION_PAUSE = 8;
-export const ACTION_CONFIRM = 16;
-export const ACTION_GARAGE = 32;
+// Keyboard + mouse input. Keys are read per frame by main.js; no listeners elsewhere.
+export function createInput() {
+  const keys = {};
+  const state = { keys, mouseX: 0, mouseY: 0, clicked: false, orbit: 0 };
+  window.addEventListener('keydown', (e) => {
+    keys[e.code] = true;
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) e.preventDefault();
+  });
+  window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+  window.addEventListener('mousemove', (e) => { state.mouseX = e.clientX; state.mouseY = e.clientY; });
+  window.addEventListener('mousedown', () => { state.clicked = true; });
+  window.addEventListener('mouseup', () => { state.clicked = false; });
+  window.addEventListener('blur', () => { for (const k of Object.keys(keys)) keys[k] = false; });
+  return state;
+}
 
-const UP = new Set(['ArrowUp', 'KeyW']);
-const DOWN = new Set(['ArrowDown', 'KeyS']);
-const LEFT = new Set(['ArrowLeft', 'KeyA']);
-const RIGHT = new Set(['ArrowRight', 'KeyD']);
-const ENTER = new Set(['KeyE']);
-const WEAPON = new Set(['Digit1', 'Digit2', 'Digit3', 'KeyQ']);
-const RADIO = new Set(['KeyR']);
-const GARAGE = new Set(['KeyG']);
-const PAUSE = new Set(['KeyP', 'Escape']);
-const CONFIRM = new Set(['Space', 'Enter']);
-
-export function createInput(target) {
-  let up = false;
-  let down = false;
-  let left = false;
-  let right = false;
-  let actions = 0;
-  let mouseX = 0;
-  let mouseY = 0;
-  let mouseDown = false;
-
-  window.addEventListener('keydown', (event) => {
-    if (UP.has(event.code)) up = true;
-    else if (DOWN.has(event.code)) down = true;
-    else if (LEFT.has(event.code)) left = true;
-    else if (RIGHT.has(event.code)) right = true;
-    else if (ENTER.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_ENTER;
-    } else if (WEAPON.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_WEAPON;
-    } else if (RADIO.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_RADIO;
-    } else if (GARAGE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_GARAGE;
-    } else if (PAUSE.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_PAUSE;
-    } else if (CONFIRM.has(event.code)) {
-      if (!event.repeat) actions |= ACTION_CONFIRM;
-    } else return;
-    event.preventDefault();
-  });
-  window.addEventListener('keyup', (event) => {
-    if (UP.has(event.code)) up = false;
-    else if (DOWN.has(event.code)) down = false;
-    else if (LEFT.has(event.code)) left = false;
-    else if (RIGHT.has(event.code)) right = false;
-  });
-  // A key released while the tab is hidden never sends keyup: let go of everything on blur.
-  window.addEventListener('blur', () => {
-    up = false;
-    down = false;
-    left = false;
-    right = false;
-    mouseDown = false;
-  });
-  target.addEventListener('pointermove', (event) => {
-    const rect = target.getBoundingClientRect();
-    mouseX = event.clientX - rect.left;
-    mouseY = event.clientY - rect.top;
-  });
-  target.addEventListener('pointerdown', (event) => {
-    const rect = target.getBoundingClientRect();
-    mouseX = event.clientX - rect.left;
-    mouseY = event.clientY - rect.top;
-    mouseDown = true;
-    actions |= ACTION_CONFIRM;
-  });
-  target.addEventListener('pointerup', () => {
-    mouseDown = false;
-  });
-
-  return {
-    /** -1/0/1 on each axis, from the held keys. */
-    axes() {
-      return { x: (right ? 1 : 0) - (left ? 1 : 0), y: (down ? 1 : 0) - (up ? 1 : 0) };
-    },
-    /** The one-shot presses since the last call, as ACTION_* flags. */
-    takeActions() {
-      const taken = actions;
-      actions = 0;
-      return taken;
-    },
-    /** Pointer position in canvas pixels, and whether the button is held (for auto weapons). */
-    pointer() {
-      return { x: mouseX, y: mouseY, down: mouseDown };
-    },
-  };
+export function inputVector(input) {
+  const k = input.keys;
+  let f = 0, r = 0;
+  if (k.KeyW || k.ArrowUp) f += 1;
+  if (k.KeyS || k.ArrowDown) f -= 1;
+  if (k.KeyA || k.ArrowLeft) r -= 1;
+  if (k.KeyD || k.ArrowRight) r += 1;
+  return { forward: f, right: r, run: !!k.ShiftLeft || !!k.ShiftRight };
 }

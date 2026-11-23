@@ -1,149 +1,78 @@
-// Azura Bay — every tuning number, colour and name in one place. The city is a fixed
-// 3200x2400 logical island; the camera follows the player, so no rule below depends on the
-// screen size. All names are invented: no Rockstar names, no real GTA content.
-export const WORLD = { width: 3200, height: 2400 };
+// Azura Bay — static configuration: districts, missions, names, tuning.
+// Original fiction: a sun-soaked island city. No real-world or commercial-game names.
 
-/** The simulation's fixed step, in seconds: 60 updates a second whatever the display rate. */
-export const STEP = 1 / 60;
-
-/** Avenues (vertical) and streets (horizontal); every road is this wide. */
-export const ROADS_X = [400, 900, 1400, 1900, 2400, 2900];
-export const ROADS_Y = [400, 850, 1300, 1750, 2200];
-export const ROAD_W = 110;
-
-/** The sand rim around the island, and the water beyond it. */
-export const SAND = 150;
-
-/** A water inlet cut into the island's east edge: the marina basin with docks and boats. */
-export const MARINA_BASIN = { x: 2980, y: 1400, w: 220, h: 300 };
-
-/** Roof colours for the city's buildings — terracotta, slate, sand, rust, green, blue-grey. */
-export const ROOF_COLORS = ['#a85f3f', '#5a6a72', '#c9b078', '#8a5a3a', '#5a7a4a', '#6a7a8a', '#b5a06a', '#7a6a5a'];
-
-/** Canopy colours: palms, round trees, autumn trees and dark bushes. */
-export const TREE_COLORS = ['#3f7a3a', '#4a8a44', '#5a9a4a', '#7a9a3a', '#b58a3a', '#2f6a35'];
+export const CITY = {
+  name: 'AZURA BAY',
+  seed: 20261123,
+  // City extents (world units, 1 unit ~ 1 m).
+  half: 260,
+  roadHalfWidth: 7,
+  sidewalk: 3,
+};
 
 export const DISTRICTS = [
-  { id: 'downtown', name: 'Downtown', x0: 900, y0: 1075, x1: 2300, y1: 1750, tint: '#7fae7a' },
-  { id: 'oldtown', name: 'Old Town', x0: 0, y0: 0, x1: 1600, y1: 1075, tint: '#b5a06a' },
-  { id: 'hills', name: 'The Hills', x0: 1600, y0: 0, x1: 3200, y1: 1075, tint: '#8fae6a' },
-  { id: 'docks', name: 'The Docks', x0: 0, y0: 1075, x1: 900, y1: 2400, tint: '#7a8a9a' },
-  { id: 'marina', name: 'Marina', x0: 2300, y0: 1075, x1: 3200, y1: 2400, tint: '#6aa5b5' },
+  { id: 'pasaru', name: 'OLD PASARU', sub: 'Stilt houses and the night market', center: [-120, -60], color: '#e07840' },
+  { id: 'strand', name: 'KUMALA STRAND', sub: 'Strand Boulevard', center: [150, 40], color: '#e0a83c' },
+  { id: 'downtown', name: 'DOWNTOWN', sub: 'Glass towers and the bank', center: [40, -90], color: '#7fb2e0' },
+  { id: 'port', name: 'PORT MERIDIAN', sub: 'Docks and warehouses', center: [-160, 130], color: '#8fae9c' },
+  { id: 'hillcrest', name: 'HILLCREST', sub: 'Houses over the bay', center: [120, -170], color: '#c98ad0' },
 ];
 
-/** Which district a point is in (Downtown's rect wins where regions overlap). */
-export function districtAt(x, y) {
-  for (const d of DISTRICTS) {
-    if (x >= d.x0 && x < d.x1 && y >= d.y0 && y < d.y1) return d;
-  }
-  return DISTRICTS[1];
-}
+export const MISSIONS = [
+  { id: 1, name: 'FIRST ERRAND', district: 'downtown', stage: 'STAGE 1/1 · REACH THE MARKET STALL',
+    objective: 'Walk the package to the stall in Old Pasaru.', next: 'Finish the job',
+    speaker: 'ABUELA CLEO', line: 'Cleo: You want work, kid? Walk this package to the market stall. No sirens, no shortcuts through the sea.',
+    reward: 500, wanted: 0 },
+  { id: 2, name: 'HOT WHEELS', district: 'strand', stage: 'STAGE 1/2 · BORROW A RIDE',
+    objective: 'Take a car from Strand Boulevard and lose the tail.', next: 'Lose the tail',
+    speaker: 'MIRA KESANG', line: 'Mira: Any car with four wheels will do. Just don\'t pick the one with the baby seat.',
+    reward: 900, wanted: 1 },
+  { id: 3, name: 'FISH MARKET BLUES', district: 'pasaru', stage: 'STAGE 1/1 · QUIET THE DOCKS',
+    objective: 'Settle the fish-stall debt without a scene.', next: 'Collect the debt',
+    speaker: 'LIO', line: 'Lio: The fish man owes us. Ask nice first. Nice has a time limit.',
+    reward: 1200, wanted: 1 },
+  { id: 4, name: 'MARKET SQUEEZE', district: 'pasaru', stage: 'STAGE 1/1 · CLEAR THE AISLES',
+    objective: 'Take out the Keron Boys 0/3.', next: 'Finish the job',
+    speaker: 'MIRA KESANG', line: 'Mira: Two down the left aisle! I\'ve got the stall side, Tomo.',
+    reward: 1800, wanted: 2 },
+  { id: 5, name: 'THE VAULT', district: 'downtown', stage: 'STAGE 1/2 · REACH THE BANK',
+    objective: 'Reach the bank on the downtown strip.', next: 'Hold the plaza',
+    speaker: 'ABUELA CLEO', line: 'Cleo: The bank keeps a safe in the back. In, out, gone. The alarm is your starting gun.',
+    reward: 4000, wanted: 2 },
+  { id: 6, name: 'ORU\'S FALL', district: 'strand', stage: 'STAGE 1/1 · WRECK THE REGENT',
+    objective: 'Wreck Oru\'s Regent before it reaches the pier.', next: 'Finish the job',
+    speaker: 'MIRA KESANG', line: 'Mira: He\'s making for Kumala Pier! Ram the Regent before it reaches the water!',
+    reward: 3500, wanted: 5 },
+  { id: 7, name: 'HELI HUNT', district: 'port', stage: 'STAGE 1/1 · DODGE AIR ONE',
+    objective: 'Cross the docks while Air One circles overhead.', next: 'Reach the warehouse',
+    speaker: 'KIKI', line: 'Kiki: The heli sees everything except the containers. Stay under the cranes, Tomo.',
+    reward: 2600, wanted: 4 },
+  { id: 8, name: 'AZURA HEIST', district: 'downtown', stage: 'STAGE 1/3 · THE BIG ONE',
+    objective: 'Hit the vault, the getaway car, and the bridge — in that order.', next: 'Get to the bridge',
+    speaker: 'ABUELA CLEO', line: 'Cleo: Eight jobs to get here, kid. Don\'t trip on the last step.',
+    reward: 9000, wanted: 3 },
+];
 
-export const PLAYER = {
-  walkSpeed: 230,
-  radius: 14,
-  health: 100,
-  fistRange: 46,
-  fistDamage: 12,
-};
+export const CREW = [
+  { key: 'Z', name: 'SWAP PLATES', who: 'MIRA · Driver', desc: 'Swap plates, lose one star' },
+  { key: 'X', name: 'QUICK FIX', who: 'LIO · Mechanic', desc: 'Repair the car on the spot' },
+  { key: 'C', name: 'EYES OUT', who: 'KIKI · Lookout', desc: 'Mark police on the minimap' },
+];
 
 export const WEAPONS = [
-  { id: 'fists', name: 'Fists', damage: 12, range: 46, rate: 2.2, ammo: Infinity, auto: false },
-  { id: 'pistol', name: 'Pistol', damage: 26, range: 430, rate: 3.0, ammo: 120, auto: false },
-  { id: 'smg', name: 'SMG', damage: 13, range: 380, rate: 9.0, ammo: 240, auto: true },
+  { slot: 1, name: 'FISTS', ammo: '∞' },
+  { slot: 2, name: '.38', ammo: '48' },
+  { slot: 3, name: 'SMG', ammo: '120' },
 ];
 
-/** The five garage cars. topSpeed is px/s before crew and engine bonuses. */
-export const CARS = [
-  { id: 'corto', name: 'Corto', top: 400, accel: 470, grip: 2.6, health: 100, price: 0, color: '#c94f43' },
-  { id: 'brisa', name: 'Brisa', top: 445, accel: 510, grip: 2.8, health: 120, price: 800, color: '#4f7ec9' },
-  { id: 'toro', name: 'Toro', top: 505, accel: 560, grip: 2.5, health: 150, price: 1800, color: '#c9a13b' },
-  { id: 'vela', name: 'Vela', top: 565, accel: 620, grip: 3.1, health: 130, price: 3500, color: '#7ac94f' },
-  { id: 'cometa', name: 'Cometa', top: 625, accel: 680, grip: 3.4, health: 140, price: 6000, color: '#a04fc9' },
-];
+export const SHOP_SIGNS = ['BAKSO', 'TACOS', 'FISH', 'PIER', 'SHOP', 'CAFE', 'ROTI', 'MART', 'KITE', 'SOTO', 'NASI', 'KOPI'];
 
-export const UPGRADES = {
-  engine: { name: 'Engine', max: 3, base: 400, topBonus: 0.09 },
-  tires: { name: 'Tires', max: 3, base: 300, gripBonus: 0.18 },
-  armor: { name: 'Armor', max: 3, base: 350, healthBonus: 40 },
+export const SHIRT_COLORS = [0xe05a5a, 0x5ab0e0, 0x62c06a, 0xe0c05a, 0xc06ad0, 0xe08a3c, 0x3cc0b0, 0xf0f0f0, 0x404040, 0xe07ab0];
+export const CAR_COLORS = [0xe05a3c, 0x3c7ae0, 0xe0c53c, 0x5ac06a, 0xf0f0f0, 0x2a2a2e, 0xc05a8a, 0x7a5ac0, 0x3ca8a0, 0x8a6a4a];
+
+export const TUNING = {
+  walkSpeed: 6, runSpeed: 10, carAccel: 26, carMaxSpeed: 42, carBrake: 40,
+  carTurn: 2.1, wantedDecaySeconds: 45, heliAtStars: 4, roadblockAtStars: 3,
+  trafficCount: 42, pedCount: 204, buildingCount: 136, stallCount: 20, propCount: 47,
+  trafficLightCount: 10, trafficLightCycle: 12, // seconds; red at t = 2 in shots
 };
-
-/** Heat: 0..100 points, 20 per star. */
-export const HEAT = {
-  perStar: 20,
-  stealCar: 15,
-  shoot: 8,
-  hitPed: 20,
-  hitCop: 25,
-  killCop: 35,
-  decay: 1.6,
-  decayHidden: 4.5,
-  decayVera: 2.6,
-};
-
-/** The fixer, the crew and the safehouse. */
-export const FIXER = { name: 'Abuela Cleo', x: 1150, y: 640 };
-export const SAFEHOUSE = { x: 2650, y: 2050 };
-export const GARAGE = { x: 1650, y: 1525 };
-export const BANK = { x: 1650, y: 1075 };
-export const CASINO = { x: 2150, y: 620 };
-
-export const CREW = {
-  rook: { name: 'Rook', bonus: 'Top speed +12%', topBonus: 0.12 },
-  vera: { name: 'Vera', bonus: 'Heat cools faster, roadblocks held back', heatBonus: true },
-};
-
-export const PALETTE = {
-  grass: '#6f9e5e',
-  grass2: '#7fae6a',
-  grassDark: '#5d8a4e',
-  grassLight: '#8aba76',
-  dryGrass: '#a8a06a',
-  sand: '#e0c98f',
-  sandDark: '#c9b078',
-  sandLight: '#ecdcab',
-  water: '#3d7ea6',
-  waterDeep: '#2a5a7a',
-  road: '#3a3a42',
-  roadLine: '#d8c95a',
-  roadEdge: 'rgba(242,240,232,0.28)',
-  sidewalk: '#b0a894',
-  curb: '#8a8474',
-  crosswalk: 'rgba(242,240,232,0.85)',
-  plaza: '#a8a294',
-  parkPath: '#d8c9a0',
-  building: '#8a6f5c',
-  building2: '#6a7a8a',
-  building3: '#a08a6a',
-  roof: '#5c4a3a',
-  parapet: 'rgba(0,0,0,0.28)',
-  roofFeature: '#7a7a72',
-  skylight: '#b8d8e8',
-  palm: '#3f7a3a',
-  bush: '#2f6a35',
-  trunk: '#6a4a2a',
-  shadow: 'rgba(0,0,0,0.22)',
-  glowWarm: 'rgba(255,200,90,0.30)',
-  dock: '#7a5a3a',
-  boatHull: '#e8e0d0',
-  panel: 'rgba(16,18,24,0.88)',
-  text: '#f2f0e8',
-  muted: '#b9b4a6',
-  gold: '#f2c94c',
-  red: '#e5534b',
-  blue: '#4f7ec9',
-  police: '#22262e',
-  night: 'rgba(10,14,40,0.45)',
-  dusk: 'rgba(200,90,40,0.18)',
-};
-
-export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';
-
-/** Where the save lives between visits (this browser only). */
-export const SAVE_KEY = 'azura-bay.save.v1';
-
-export const RADIO = [
-  { id: 'sol', name: 'Sol Mar FM', bpm: 96, root: 220, scale: [0, 3, 5, 7, 10] },
-  { id: 'brisa', name: 'Brisa FM', bpm: 122, root: 196, scale: [0, 2, 4, 7, 9] },
-  { id: 'neon', name: 'Neon FM', bpm: 140, root: 174, scale: [0, 3, 5, 6, 10] },
-];

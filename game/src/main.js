@@ -1,292 +1,196 @@
-// Boot and the one loop: input is read once per frame, the world advances in fixed 1/60 s
-// steps (several in a slow frame, none in a fast one), and the renderer paints what is
-// there. The game moves between six screens: title, play, paused, garage, over and win.
-// Actions are taken once per frame and handed to the first simulation step only, so a press
-// is never lost and never counted twice.
-//
-// ?seed=N fixes the city. ?shot=cover|city|mission|night (with &seed=N) stages that scene
-// instead of running the loop, paints it twice and sets window.__shotReady for a screenshot.
-// ?selftest=1 runs nine headless checks and sets window.__selftest with the results.
-import { SAVE_KEY, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { EVENT_BUSTED, EVENT_MISSION, EVENT_WASTED, EVENT_WIN, createWorld } from './world.js';
-import { ACTION_CONFIRM, ACTION_GARAGE, ACTION_PAUSE, ACTION_RADIO, createInput } from './input.js';
+// Azura Bay — boot, game loop, driving / walking, stealing cars, combat, saves.
+// ?shot=cover|city|mission|night renders one frozen staged frame for screenshots.
+// ?selftest=1 runs the 12 checks and reports them in the DOM + document.title.
+import * as THREE from 'three';
+import { CITY, TUNING, MISSIONS } from './config.js';
+import { buildWorld, updateWorld, ROADS, districtAt } from './world.js';
+import { createGame, buildCity, placeCamera, chaseCamera } from './render.js';
+import { initHud, updateHud, showOverlay } from './hud.js';
+import { createInput, inputVector } from './input.js';
 import { createAudio } from './audio.js';
-import {
-  SCREEN_GARAGE, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE, SCREEN_WIN, createRenderer,
-} from './render.js';
-import { stageShot } from './shots.js';
+import { startMission, missionTick, completeMission } from './missions.js';
+import { policeRows, addWanted } from './police.js';
+import { SHOTS, stageShot, runSelfTest } from './shots.js';
 
-/** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped. */
-const MAX_FRAME = 0.25;
+window.__errors = [];
+window.addEventListener('error', (e) => window.__errors.push(String(e.message || e.error)));
+window.addEventListener('unhandledrejection', (e) => window.__errors.push(String(e.reason)));
 
-const params = new URLSearchParams(window.location.search);
-const shot = params.get('shot');
+const params = new URLSearchParams(location.search);
+const shotName = params.get('shot');
 const selftest = params.get('selftest') === '1';
-const seedParam = Number.parseInt(params.get('seed') ?? '', 10);
-const seed = Number.isInteger(seedParam) ? seedParam : 7;
+const seed = Number(params.get('seed') || CITY.seed);
 
-const canvas = document.getElementById('game');
-const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
-const renderer = createRenderer(canvas);
+const canvas = document.getElementById('scene');
+const world = buildWorld(seed);
+window.__roads = ROADS;
+window.__world = world;
+
+const game = createGame(canvas);
+const tod = shotName ? (SHOTS[shotName] || SHOTS.cover).tod : 'dusk';
+const built = buildCity(game, world, tod);
+initHud();
+const input = createInput();
 const audio = createAudio();
-const input = createInput(canvas);
+startMission(world, 0);
 
-function readSave() {
-  try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
+let playerCarMesh = null;
+
+function nearestTrafficCar(maxDist) {
+  const p = world.player;
+  let best = null, bd = maxDist;
+  for (const c of world.cars) {
+    if (c.type === 'kpd') continue;
+    const d = Math.hypot(c.x - p.x, c.z - p.z);
+    if (d < bd) { bd = d; best = c; }
   }
+  return best;
 }
 
-/** Nine headless checks over a fresh world; the results land on window.__selftest. */
-function runSelftest() {
-  const checks = [];
-  function check(name, fn) {
-    try {
-      checks.push({ name, pass: !!fn() });
-    } catch (error) {
-      checks.push({ name, pass: false, error: String(error && error.message ? error.message : error) });
+function stealCar(car) {
+  const p = world.player;
+  const mesh = built.dyn.cars.find((g) => g.userData.car === car);
+  if (mesh) { mesh.userData.playerDriven = true; playerCarMesh = mesh; }
+  // The stolen car leaves the traffic sim; the old ride (if any) is parked behind.
+  world.cars = world.cars.filter((c) => c !== car);
+  if (p.carRef) {
+    p.carRef.speed = 0.5;
+    world.cars.push(p.carRef);
+  }
+  p.carRef = car;
+  p.car = { name: car.type === 'bus' ? 'SCHOOL BUS' : 'STOLEN SEDAN', color: car.color, condition: 88 };
+  p.onFoot = false;
+  p.speed = 0;
+  addWanted(world, 1);
+}
+
+function exitCar() {
+  const p = world.player;
+  if (!p.carRef) return;
+  p.x += Math.sin(p.heading + Math.PI / 2) * 3;
+  p.z += Math.cos(p.heading + Math.PI / 2) * 3;
+  p.onFoot = true;
+  p.speed = 0;
+  if (playerCarMesh) { playerCarMesh.userData.playerDriven = false; playerCarMesh = null; }
+}
+
+function hitsBuilding(x, z) {
+  for (const b of world.buildings) {
+    if (Math.abs(x - b.x) < b.w / 2 + 1 && Math.abs(z - b.z) < b.d / 2 + 1) return true;
+  }
+  return false;
+}
+
+function drive(dt) {
+  const p = world.player;
+  const v = inputVector(input);
+  if (v.forward > 0) p.speed = Math.min(TUNING.carMaxSpeed, p.speed + TUNING.carAccel * dt);
+  else if (v.forward < 0) p.speed = Math.max(-8, p.speed - TUNING.carBrake * dt);
+  else p.speed *= Math.max(0, 1 - 1.4 * dt);
+  p.heading += v.right * TUNING.carTurn * dt * Math.min(1, Math.abs(p.speed) / 12) * Math.sign(p.speed || 1);
+  const nx = p.x + Math.sin(p.heading) * p.speed * dt;
+  const nz = p.z + Math.cos(p.heading) * p.speed * dt;
+  if (!hitsBuilding(nx, nz)) { p.x = nx; p.z = nz; }
+  p.x = Math.max(-250, Math.min(250, p.x));
+  p.z = Math.max(-250, Math.min(250, p.z));
+  if (playerCarMesh) {
+    playerCarMesh.position.set(p.x, 0, p.z);
+    playerCarMesh.rotation.y = p.heading;
+    if (p.carRef) { p.carRef.x = p.x; p.carRef.z = p.z; p.carRef.heading = p.heading; }
+  }
+  if (Math.abs(p.speed) > 30) addWanted(world, 0); // speeding alone does not raise stars
+}
+
+function walk(dt) {
+  const p = world.player;
+  const v = inputVector(input);
+  if (v.right !== 0) p.heading += v.right * 2.4 * dt;
+  const sp = v.run ? TUNING.runSpeed : TUNING.walkSpeed;
+  const nx = p.x + Math.sin(p.heading) * v.forward * sp * dt;
+  const nz = p.z + Math.cos(p.heading) * v.forward * sp * dt;
+  if (v.forward !== 0 && !hitsBuilding(nx, nz)) { p.x = nx; p.z = nz; p.speed = Math.abs(v.forward) * sp; }
+  else p.speed = 0;
+  p.x = Math.max(-250, Math.min(250, p.x));
+  p.z = Math.max(-250, Math.min(250, p.z));
+}
+
+let eWasDown = false;
+function handleActions(dt) {
+  const p = world.player;
+  const eDown = !!input.keys.KeyE;
+  if (eDown && !eWasDown) {
+    if (p.onFoot) { const car = nearestTrafficCar(7); if (car) stealCar(car); }
+    else exitCar();
+  }
+  eWasDown = eDown;
+  if (input.keys.Digit1) p.weapon = 0;
+  if (input.keys.Digit2) p.weapon = 1;
+  if (input.keys.Digit3) p.weapon = 2;
+  if (input.keys.KeyR) { audio.setStation(p.radio + 1); p.radio = (p.radio + 1) % 3; input.keys.KeyR = false; }
+  if (input.keys.KeyG) { p.car.condition = 100; p.money = Math.max(0, p.money - 200); input.keys.KeyG = false; }
+  if (input.keys.KeyX) { p.car.condition = 100; p.money = Math.max(0, p.money - 100); input.keys.KeyX = false; }
+  if (input.clicked && p.weapon > 0) { addWanted(world, 0.05); input.clicked = false; }
+  if (missionTick(world, dt)) completeMission(world);
+  if (p.health <= 0) { showOverlay(true, 'BUSTED', 'The KPD caught up with you. Press R to restart.'); }
+}
+
+function renderFrame() {
+  game.renderer.render(game.scene, game.camera);
+}
+
+function resize() {
+  const w = canvas.clientWidth || 1280, h = canvas.clientHeight || 720;
+  game.renderer.setSize(w, h, false);
+  game.camera.aspect = w / h;
+  game.camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- Staged screenshot / self-test modes: frozen frame, no loop.
+if (shotName || selftest) {
+  showOverlay(false);
+  if (shotName) {
+    const staged = stageShot(world, shotName);
+    updateWorld(world, 0);
+    built.update(0, 2.0);
+    placeCamera(game, staged.camera.pos[0], staged.camera.pos[1], staged.camera.pos[2],
+      staged.camera.look[0], staged.camera.look[1], staged.camera.look[2]);
+    game.camera.fov = 65; // wider for shots: hero car + low heli both stay in frame
+    game.camera.updateProjectionMatrix();
+  }
+  updateHud(world, policeRows(world));
+  renderFrame(); renderFrame(); renderFrame();
+  if (selftest) runSelfTest(game, world);
+  else { document.title = 'SHOT READY'; window.__shotReady = true; }
+} else {
+  // ---- Play mode.
+  showOverlay(true, 'AZURA BAY', 'Click to start — WASD drive / walk · E enter car · Click shoot · 1-3 weapons · R radio · G garage · P pause');
+  let started = false;
+  let paused = false;
+  canvas.addEventListener('click', () => {
+    if (!started) { started = true; showOverlay(false); audio.unlock(); }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'KeyP' && started) { paused = !paused; showOverlay(paused, 'PAUSED', 'Press P to continue'); }
+    if (e.code === 'KeyR' && world.player.health <= 0) {
+      world.player.health = 100; world.player.stars = 0; showOverlay(false);
     }
-  }
-  const test = createWorld(createRandom(7));
-  const s = test.state;
-  const idle = { axes: { x: 0, y: 0 }, aimX: s.player.x + 100, aimY: s.player.y, firing: false, actions: 0 };
-  check('city builds', () => test.buildings.length > 50);
-  check('traffic spawns', () => s.cars.filter((c) => c.kind === 'traffic').length >= 20);
-  check('pedestrians spawn', () => s.peds.length >= 30);
-  check('600 steps clean', () => {
-    for (let i = 0; i < 600; i += 1) test.step(STEP, idle);
-    return Number.isFinite(s.player.x) && Number.isFinite(s.player.y) && s.player.health > 0;
   });
-  check('mission starts', () => s.mission !== null && s.mission.def.name === 'Errand Run');
-  check('police spawn at heat', () => {
-    s.heat = 65;
-    for (let i = 0; i < 120; i += 1) test.step(STEP, idle);
-    return s.cruisers.length >= 1;
-  });
-  check('mission advances', () => {
-    const before = s.missionIndex;
-    const target = s.objective;
-    if (!target) return false;
-    s.player.x = target.x;
-    s.player.y = target.y;
-    for (let i = 0; i < 30; i += 1) test.step(STEP, idle);
-    return s.missionIndex > before || (s.mission && s.mission.stepIndex > 0);
-  });
-  check('renderer paints', () => {
-    renderer.draw(test, s, SCREEN_PLAY, 0, { selected: 0 });
-    const ctx = canvas.getContext('2d');
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    let lit = 0;
-    for (let i = 0; i < data.length; i += 997) if (data[i] > 0) lit += 1;
-    return lit > 0;
-  });
-  check('save/load round-trip', () => {
-    s.cash = 1234;
-    if (!test.save()) return false;
-    s.cash = 0;
-    if (!test.load()) return false;
-    return s.cash === 1234;
-  });
-  window.__selftest = { pass: checks.every((c) => c.pass), checks };
-  // Paint one frame so the page is not blank behind the result.
-  renderer.draw(test, s, SCREEN_PLAY, 0, { selected: 0 });
-}
-
-function runShot(name) {
-  const scene = stageShot(name, world);
-  let painted = 0;
-  function paint() {
-    renderer.draw(world, world.state, scene.screen, scene.best, { selected: 0 });
-    painted += 1;
-    if (painted < 2) requestAnimationFrame(paint);
-    else window.__shotReady = true;
-  }
-  requestAnimationFrame(paint);
-}
-
-function runGame() {
-  let screen = SCREEN_TITLE;
-  let overKind = '';
-  let garage = { selected: 0 };
-  let best = readSave();
-  let accumulator = 0;
   let last = performance.now();
-  let prevDown = false;
-
-  function announce(message) {
-    status.textContent = message;
-  }
-
-  function camera() {
-    const p = world.state.player;
-    return {
-      x: Math.max(640, Math.min(3200 - 640, p.x)),
-      y: Math.max(360, Math.min(2400 - 360, p.y)),
-    };
-  }
-
-  function aimWorld() {
-    const pointer = input.pointer();
-    const rect = canvas.getBoundingClientRect();
-    const scale = Math.min(rect.width / 1280, rect.height / 720);
-    const ox = (rect.width - 1280 * scale) / 2;
-    const oy = (rect.height - 720 * scale) / 2;
-    const cam = camera();
-    return {
-      x: cam.x + (pointer.x - ox) / scale - 640,
-      y: cam.y + (pointer.y - oy) / scale - 360,
-    };
-  }
-
-  function startGame() {
-    const save = readSave();
-    if (save) {
-      world.load();
-      announce(`Welcome back. Mission ${world.state.missionIndex + 1} of 8.`);
-    } else {
-      world.reset();
-      announce('Azura Bay. Cleo is waiting — find her in Old Town.');
-    }
-    accumulator = 0;
-    screen = SCREEN_PLAY;
-  }
-
-  function endRun(kind) {
-    overKind = kind;
-    screen = SCREEN_OVER;
-    announce(kind === 'busted' ? 'Busted. The fine took $200.' : 'Wasted. The hospital took $200.');
-  }
-
-  function nearGarage() {
-    const p = world.state.player;
-    return Math.hypot(p.x - 1650, p.y - 1525) < 150;
-  }
-
-  // Garage keys are read here, not by the shared input: 1-5 buy/select a car, Z/X/C buy an
-  // upgrade for the selected car, G or Esc leaves.
-  window.addEventListener('keydown', (event) => {
-    if (screen !== SCREEN_GARAGE) return;
-    if (event.code === 'Escape' || event.code === 'KeyG') {
-      screen = SCREEN_PLAY;
-      return;
-    }
-    const num = ['Digit1', 'Digit2', 'Digit3', 'Digit4', 'Digit5'].indexOf(event.code);
-    if (num >= 0) {
-      garage.selected = num;
-      const defs = ['corto', 'brisa', 'toro', 'vela', 'cometa'];
-      if (world.buyCar(defs[num])) audio.blip(990);
-      return;
-    }
-    const defs = ['corto', 'brisa', 'toro', 'vela', 'cometa'];
-    const defId = defs[garage.selected];
-    if (event.code === 'KeyZ' && world.buyUpgrade(defId, 'engine')) audio.blip(990);
-    else if (event.code === 'KeyX' && world.buyUpgrade(defId, 'tires')) audio.blip(990);
-    else if (event.code === 'KeyC' && world.buyUpgrade(defId, 'armor')) audio.blip(990);
-  });
-  window.addEventListener('keydown', () => audio.unlock());
-  canvas.addEventListener('pointerdown', () => audio.unlock());
-
-  function step(actions) {
-    const pointer = input.pointer();
-    const aim = aimWorld();
-    const firing = pointer.down && (world.state.weapon === 2 || !prevDown);
-    prevDown = pointer.down;
-    const axes = input.axes();
-    const events = world.step(STEP, { axes, aimX: aim.x, aimY: aim.y, firing, actions });
-    if (events & 32) audio.gunshot();
-    if (events & 16) audio.crash();
-    if (events & EVENT_MISSION) {
-      world.save();
-      announce(world.state.banner || 'Mission done.');
-    }
-    if (events & EVENT_WIN) {
-      world.save();
-      screen = SCREEN_WIN;
-      announce('Azura Bay is yours. All eight missions done.');
-    } else if (events & EVENT_BUSTED) {
-      endRun('busted');
-    } else if (events & EVENT_WASTED) {
-      endRun('wasted');
-    }
-  }
-
-  function frame(now) {
-    requestAnimationFrame(frame);
-    accumulator += Math.min((now - last) / 1000, MAX_FRAME);
+  function loop(now) {
+    requestAnimationFrame(loop);
+    const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
-    const actions = input.takeActions();
-
-    if (screen === SCREEN_TITLE) {
-      if (actions & ACTION_CONFIRM) {
-        startGame();
-      } else {
-        // The island idles behind the title: traffic rolls, nothing can hurt the player.
-        world.step(STEP, { axes: { x: 0, y: 0 }, aimX: 0, aimY: 0, firing: false, actions: 0 });
-      }
-      world.state.radioName = audio.stationName();
-    } else if (screen === SCREEN_PLAY) {
-      if (actions & ACTION_PAUSE) {
-        screen = SCREEN_PAUSED;
-        world.save();
-        announce('Paused.');
-      } else if (actions & ACTION_GARAGE && nearGarage()) {
-        screen = SCREEN_GARAGE;
-        announce('Azura Garage.');
-      } else if (actions & ACTION_RADIO) {
-        const name = audio.nextStation();
-        world.state.radioName = name;
-        world.state.banner = `Radio: ${name}`;
-        world.state.bannerTimer = 2;
-      }
-      if (screen === SCREEN_PLAY) {
-        let first = true;
-        while (accumulator >= STEP) {
-          step(first ? actions : 0);
-          first = false;
-          accumulator -= STEP;
-          if (screen !== SCREEN_PLAY) break;
-        }
-        const p = world.state.player;
-        const speed01 = p.inCar ? Math.min(1, Math.abs(p.speed) / 500) : 0;
-        audio.update(speed01, Math.floor(world.state.heat / 20));
-        // The light turns with the clock: day, then dusk, then night, then day again.
-        const cycle = (world.state.time % 600) / 600;
-        world.state.timeOfDay = cycle < 0.55 ? 0 : cycle < 0.75 ? 1 : 2;
-        world.state.radioName = audio.stationName();
-      }
-    } else if (screen === SCREEN_PAUSED) {
-      if (actions & (ACTION_PAUSE | ACTION_CONFIRM)) {
-        screen = SCREEN_PLAY;
-        announce('Playing.');
-      }
-      accumulator = 0;
-    } else if (screen === SCREEN_OVER || screen === SCREEN_WIN) {
-      if (actions & ACTION_CONFIRM) startGame();
-      accumulator = 0;
-    } else {
-      accumulator = 0;
-    }
-    world.state.overKind = overKind;
-    renderer.draw(world, world.state, screen, best ? best.missionsDone : 0, garage);
+    if (!started || paused) { renderFrame(); return; }
+    updateWorld(world, dt);
+    if (world.player.onFoot) walk(dt); else drive(dt);
+    handleActions(dt);
+    built.update(dt, world.time);
+    chaseCamera(game, world);
+    updateHud(world, policeRows(world));
+    audio.tick(Math.abs(world.player.speed) / TUNING.carMaxSpeed, world.player.stars);
+    renderFrame();
   }
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && screen === SCREEN_PLAY) {
-      screen = SCREEN_PAUSED;
-      world.save();
-      announce('Paused.');
-    }
-  });
-
-  announce('Azura Bay. Press Space or click to start.');
-  requestAnimationFrame(frame);
+  requestAnimationFrame(loop);
 }
-
-if (selftest) runSelftest();
-else if (shot) runShot(shot);
-else runGame();

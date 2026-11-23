@@ -1,723 +1,438 @@
-// Drawing only: the world's state and the current screen in, pixels out. The camera follows
-// the player across the 3200x2400 island; the HUD, minimap and panels are drawn in screen
-// space. Flat shapes and canvas text, no images, no network.
-import { BANK, CARS, CASINO, DISTRICTS, FIXER, FONT, GARAGE, MARINA_BASIN, PALETTE, ROADS_X, ROADS_Y, ROAD_W, SAFEHOUSE, UPGRADES, WORLD } from './config.js';
+// Three.js renderer: low-poly Azura Bay, chase camera, dusk/day/night skies.
+// All textures are procedural canvases drawn with the seeded RNG — no network, no assets.
+import * as THREE from 'three';
+import { makeRng } from './random.js';
+import { CITY, DISTRICTS, TUNING } from './config.js';
+import { ROADS, trafficLightState } from './world.js';
 
-export const SCREEN_TITLE = 'title';
-export const SCREEN_PLAY = 'play';
-export const SCREEN_PAUSED = 'paused';
-export const SCREEN_GARAGE = 'garage';
-export const SCREEN_OVER = 'over';
-export const SCREEN_WIN = 'win';
-
-const VIEW_W = 1280;
-const VIEW_H = 720;
-
-function hash2(x, y) {
-  let h = (x * 374761393 + y * 668265263) | 0;
-  h = (h ^ (h >> 13)) | 0;
-  return ((h * 1274126177) | 0) >>> 0;
+function canvasTexture(w, h, draw) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
 }
 
-export function createRenderer(canvas) {
-  const context = canvas.getContext('2d');
-  const view = { scale: 1, ox: 0, oy: 0 };
-  const fonts = new Map();
+function windowsTexture(rng, base, floors) {
+  return canvasTexture(128, 256, (g, w, h) => {
+    g.fillStyle = base; g.fillRect(0, 0, w, h);
+    // Floor bands every 3 floors — the tower reads as stacked slabs, not a flat slab.
+    for (let f = 0; f < floors; f += 3) {
+      const y = (f / floors) * h;
+      g.fillStyle = 'rgba(0,0,0,0.35)'; g.fillRect(0, y, w, 5);
+    }
+    for (let f = 0; f < floors; f++) {
+      for (let col = 0; col < 6; col++) {
+        const lit = rng.chance(0.55);
+        g.fillStyle = lit ? '#ffd98a' : 'rgba(20,26,34,0.9)';
+        g.fillRect(10 + col * 19, 12 + f * (h - 20) / floors, 12, 9);
+      }
+    }
+  });
+}
 
-  function resize() {
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.round(window.innerWidth * ratio);
-    canvas.height = Math.round(window.innerHeight * ratio);
-    view.scale = Math.min(canvas.width / VIEW_W, canvas.height / VIEW_H);
-    view.ox = (canvas.width - VIEW_W * view.scale) / 2;
-    view.oy = (canvas.height - VIEW_H * view.scale) / 2;
+function awningTexture(c1, c2) {
+  return canvasTexture(128, 64, (g, w, h) => {
+    for (let i = 0; i < 8; i++) { g.fillStyle = i % 2 ? c1 : c2; g.fillRect(i * 16, 0, 16, h); }
+    g.fillStyle = 'rgba(0,0,0,0.25)'; g.fillRect(0, h - 8, w, 8);
+  });
+}
+
+function signTexture(text, fg, bg) {
+  return canvasTexture(256, 64, (g, w, h) => {
+    g.fillStyle = bg; g.fillRect(0, 0, w, h);
+    g.fillStyle = fg; g.font = 'bold 40px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(text, w / 2, h / 2 + 2);
+  });
+}
+
+function groundTexture() {
+  return canvasTexture(1024, 1024, (g, w, h) => {
+    const S = 1024 / 560; const X = (x) => (x + 280) * S; const Z = (z) => (z + 280) * S;
+    g.fillStyle = '#6a6a5e'; g.fillRect(0, 0, w, h); // dry ground
+    g.fillStyle = '#c9b078'; g.fillRect(X(185), 0, w - X(185), h); // sand strip (east)
+    g.fillStyle = '#8a6f4a'; g.fillRect(X(-168), Z(-92), 96 * S, 64 * S); // market plaza dirt
+    for (const r of ROADS) { // asphalt + sidewalks
+      g.strokeStyle = '#9a9a92'; g.lineWidth = 20 * S; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(X(r.x1), Z(r.z1)); g.lineTo(X(r.x2), Z(r.z2)); g.stroke();
+      g.strokeStyle = '#3c3c40'; g.lineWidth = 14 * S;
+      g.beginPath(); g.moveTo(X(r.x1), Z(r.z1)); g.lineTo(X(r.x2), Z(r.z2)); g.stroke();
+      g.strokeStyle = '#e8c83c'; g.lineWidth = 1.5 * S; g.setLineDash([4 * S, 6 * S]);
+      g.beginPath(); g.moveTo(X(r.x1), Z(r.z1)); g.lineTo(X(r.x2), Z(r.z2)); g.stroke();
+      g.setLineDash([]);
+    }
+  });
+}
+
+// Triangular-prism gable roof (ridge along z).
+function gableRoofGeometry(w, d, rh) {
+  const hw = w / 2, hd = d / 2;
+  const v = [
+    // front gable (z = +hd)
+    -hw, 0, hd, hw, 0, hd, 0, rh, hd,
+    // back gable (z = -hd)
+    hw, 0, -hd, -hw, 0, -hd, 0, rh, -hd,
+    // left slope
+    -hw, 0, -hd, -hw, 0, hd, 0, rh, hd, -hw, 0, -hd, 0, rh, hd, 0, rh, -hd,
+    // right slope
+    hw, 0, hd, hw, 0, -hd, 0, rh, -hd, hw, 0, hd, 0, rh, -hd, 0, rh, hd,
+  ];
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+export function createGame(canvas) {
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+  renderer.setPixelRatio(1);
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(58, 1280 / 720, 0.5, 1500);
+  return { renderer, scene, camera };
+}
+
+export function buildCity(game, world, tod) {
+  const { scene } = game;
+  const rng = makeRng(world.seed + 77);
+  const dusk = tod === 'dusk', night = tod === 'night';
+  scene.fog = new THREE.Fog(night ? 0x0a0e1e : dusk ? 0x3a2438 : 0x9fc4e0, 160, 620);
+  scene.background = new THREE.Color(night ? 0x0a0e1e : dusk ? 0x3a2438 : 0x87b8dd);
+
+  // ---- Lights.
+  const sun = new THREE.DirectionalLight(night ? 0x8fa8ff : dusk ? 0xff9a5a : 0xfff2d8, night ? 0.55 : dusk ? 1.1 : 1.6);
+  sun.position.set(night ? -80 : 140, night ? 120 : 90, night ? 60 : -40);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(1024, 1024);
+  sun.shadow.camera.left = -130; sun.shadow.camera.right = 130;
+  sun.shadow.camera.top = 130; sun.shadow.camera.bottom = -130;
+  sun.shadow.camera.far = 500;
+  scene.add(sun);
+  scene.add(new THREE.HemisphereLight(night ? 0x24305a : dusk ? 0x8a5a70 : 0xbfd9ee, 0x3a3230, night ? 0.5 : 0.75));
+
+  // ---- Sky dome: dusk gradient + stars + moon + clouds.
+  const skyGeo = new THREE.SphereGeometry(780, 24, 16);
+  const skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(night ? 0x05070f : dusk ? 0x2a1a3a : 0x3f7ec0) },
+      mid: { value: new THREE.Color(night ? 0x101a33 : dusk ? 0x8a3a4a : 0x8fc0e8) },
+      bot: { value: new THREE.Color(night ? 0x1a2440 : dusk ? 0xe07840 : 0xf0d8a0) } },
+    vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: 'varying vec3 vP; uniform vec3 top; uniform vec3 mid; uniform vec3 bot;' +
+      'void main(){ float y = normalize(vP).y; vec3 c = y > 0.25 ? mix(mid, top, smoothstep(0.25, 0.8, y)) : mix(bot, mid, smoothstep(-0.05, 0.25, y)); gl_FragColor = vec4(c, 1.0); }',
+  });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+  const starGeo = new THREE.BufferGeometry();
+  const starPos = [];
+  for (let i = 0; i < 420; i++) {
+    const a = rng.range(0, Math.PI * 2), e = rng.range(0.15, 1.4), r = 740;
+    starPos.push(Math.cos(a) * Math.cos(e) * r, Math.sin(e) * r, Math.sin(a) * Math.cos(e) * r);
+  }
+  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ color: 0xffffff, size: 2.2, sizeAttenuation: false, transparent: true, opacity: night ? 0.9 : dusk ? 0.45 : 0.12, fog: false })));
+  const moon = new THREE.Mesh(new THREE.CircleGeometry(26, 32), new THREE.MeshBasicMaterial({ color: 0xf4ecd8, fog: false }));
+  moon.position.set(-260, 300, -560); moon.lookAt(0, 0, 0);
+  moon.visible = tod !== 'day'; // no moon in the daytime chase shot
+  scene.add(moon);
+  for (let i = 0; i < 7; i++) {
+    const cloud = new THREE.Mesh(new THREE.SphereGeometry(1, 10, 8),
+      new THREE.MeshBasicMaterial({ color: night ? 0x8a90a8 : 0xf0e8e0, transparent: true, opacity: night ? 0.35 : 0.6, fog: false }));
+    cloud.scale.set(rng.range(40, 90), rng.range(6, 10), rng.range(18, 30));
+    cloud.position.set(rng.range(-500, 500), rng.range(180, 260), rng.range(-500, 200));
+    scene.add(cloud);
   }
 
-  function text(value, x, y, size, color, align, baseline) {
-    if (!fonts.has(size)) fonts.set(size, `${size}px ${FONT}`);
-    context.font = fonts.get(size);
-    context.fillStyle = color;
-    context.textAlign = align || 'left';
-    context.textBaseline = baseline || 'alphabetic';
-    context.fillText(value, x, y);
-  }
+  // ---- Ground + sea.
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(560, 560),
+    new THREE.MeshStandardMaterial({ map: groundTexture(), roughness: 0.95 }));
+  ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
+  const sea = new THREE.Mesh(new THREE.PlaneGeometry(260, 560),
+    new THREE.MeshStandardMaterial({ color: 0x2a7ab0, roughness: 0.35, metalness: 0.1 }));
+  sea.rotation.x = -Math.PI / 2; sea.position.set(340, -0.4, 0); scene.add(sea);
 
-  function circle(x, y, r, color) {
-    context.fillStyle = color;
-    context.beginPath();
-    context.arc(x, y, r, 0, Math.PI * 2);
-    context.fill();
-  }
+  const dyn = { peds: [], cars: [], kpdBars: [], lightHeads: [], heliRotor: null, heli: null, cone: null, wheels: [] };
 
-  function rrect(x, y, w, h, r) {
-    context.beginPath();
-    context.moveTo(x + r, y);
-    context.arcTo(x + w, y, x + w, y + h, r);
-    context.arcTo(x + w, y + h, x, y + h, r);
-    context.arcTo(x, y + h, x, y, r);
-    context.arcTo(x, y, x + w, y, r);
-    context.closePath();
-  }
-
-  /** A tree with a soft shadow: palms get fronds, round trees a lumpy canopy. */
-  function drawTree(x, y, r, color, isPalm) {
-    context.fillStyle = PALETTE.shadow;
-    context.beginPath();
-    context.ellipse(x + 3, y + 4, r, r * 0.7, 0, 0, Math.PI * 2);
-    context.fill();
-    if (isPalm) {
-      context.fillStyle = PALETTE.trunk;
-      context.fillRect(x - 2, y - 2, 4, 10);
-      circle(x, y - 4, r, color);
-      circle(x - r * 0.55, y + 3, r * 0.55, '#4a8a44');
-      circle(x + r * 0.55, y + 3, r * 0.55, '#4a8a44');
+  // ---- Buildings.
+  for (const b of world.buildings) {
+    const group = new THREE.Group();
+    if (b.kind === 'tower' || b.kind === 'bank') {
+      const tex = windowsTexture(makeRng(world.seed + Math.round(b.x) * 7 + Math.round(b.z)), '#5a6068', b.floors);
+      const mat = new THREE.MeshStandardMaterial({ map: tex, emissiveMap: tex, emissive: 0xffffff, emissiveIntensity: night ? 0.5 : dusk ? 0.32 : 0.06, roughness: 0.85 });
+      const box = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h, b.d), mat);
+      box.position.y = b.h / 2; box.castShadow = true; box.receiveShadow = true; group.add(box);
+      const crown = new THREE.Mesh(new THREE.BoxGeometry(b.w * 0.7, 2, b.d * 0.7),
+        new THREE.MeshStandardMaterial({ color: 0x2a2e34, roughness: 0.9 }));
+      crown.position.y = b.h + 1; group.add(crown);
+      if (b.kind === 'bank') {
+        // Big yellow BANK sign on the WEST face — it faces the strip road and the camera.
+        const sign = new THREE.Mesh(new THREE.PlaneGeometry(20, 5),
+          new THREE.MeshBasicMaterial({ map: signTexture('BANK', '#ffd83c', '#1a1a1a') }));
+        sign.position.set(-(b.w / 2 + 0.2), b.h * 0.35, 0); sign.rotation.y = -Math.PI / 2; group.add(sign);
+        const sign2 = sign.clone(); sign2.scale.set(0.6, 0.6, 0.6);
+        sign2.position.set(0, b.h * 0.5, b.d / 2 + 0.2); sign2.rotation.y = 0; group.add(sign2);
+      }
     } else {
-      circle(x, y, r, color);
-      circle(x - r * 0.4, y - r * 0.25, r * 0.6, color);
-      circle(x + r * 0.35, y - r * 0.3, r * 0.55, color);
-      circle(x, y - r * 0.35, r * 0.35, 'rgba(255,255,255,0.18)');
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(b.w, b.h, b.d),
+        new THREE.MeshStandardMaterial({ color: b.tint, roughness: 0.9 }));
+      wall.position.y = b.h / 2; wall.castShadow = true; wall.receiveShadow = true; group.add(wall);
+      const roof = new THREE.Mesh(gableRoofGeometry(b.w + 0.6, b.d + 0.6, b.h * 0.45),
+        new THREE.MeshStandardMaterial({ color: 0x7a4a3a, roughness: 0.9 }));
+      roof.position.y = b.h; roof.castShadow = true; group.add(roof);
+      const win = new THREE.Mesh(new THREE.PlaneGeometry(b.w * 0.6, 1.4),
+        new THREE.MeshStandardMaterial({ color: 0x2a2e34, emissive: 0xffd98a, emissiveIntensity: night ? 0.9 : dusk ? 0.5 : 0.05 }));
+      win.position.set(0, b.h * 0.55, b.d / 2 + 0.05); group.add(win);
+      if (b.kind === 'shop' && b.sign) {
+        const s = new THREE.Mesh(new THREE.PlaneGeometry(Math.min(9, b.w * 0.85), 2),
+          new THREE.MeshBasicMaterial({ map: signTexture(b.sign, '#ffffff', '#22242a') }));
+        s.position.set(0, b.h + 0.4, b.d / 2 + 0.3); group.add(s);
+        const awn = new THREE.Mesh(new THREE.PlaneGeometry(b.w * 0.9, 2.4),
+          new THREE.MeshStandardMaterial({ map: awningTexture('#' + b.awning.toString(16).padStart(6, '0'), '#f0ead8'), side: THREE.DoubleSide, roughness: 0.9 }));
+        awn.position.set(0, b.h * 0.62, b.d / 2 + 1.1); awn.rotation.x = -0.5; group.add(awn);
+      }
     }
+    group.position.set(b.x, 0, b.z);
+    scene.add(group);
   }
 
-  /** A moored boat: hull with a shadow, cabin, and a mast. */
-  function drawBoat(boat) {
-    context.save();
-    context.translate(boat.x, boat.y);
-    context.rotate(boat.angle);
-    context.fillStyle = 'rgba(0,0,0,0.18)';
-    context.beginPath();
-    context.ellipse(2, 3, boat.len / 2, 9, 0, 0, Math.PI * 2);
-    context.fill();
-    context.fillStyle = boat.color;
-    rrect(-boat.len / 2, -7, boat.len, 14, 7);
-    context.fill();
-    context.fillStyle = 'rgba(20,28,40,0.8)';
-    rrect(-boat.len / 4, -4, boat.len / 2, 8, 3);
-    context.fill();
-    context.strokeStyle = '#6a4a2a';
-    context.lineWidth = 2;
-    context.beginPath();
-    context.moveTo(0, -6);
-    context.lineTo(0, -20);
-    context.stroke();
-    context.lineWidth = 1;
-    context.restore();
+  // ---- Market stalls + props.
+  for (const s of world.stalls) {
+    const g = new THREE.Group();
+    const table = new THREE.Mesh(new THREE.BoxGeometry(s.w, 0.5, s.d), new THREE.MeshStandardMaterial({ color: 0x8a6a44, roughness: 0.95 }));
+    table.position.y = 1; table.castShadow = true; g.add(table);
+    const awn = new THREE.Mesh(new THREE.PlaneGeometry(s.w + 1.5, s.d + 1.5),
+      new THREE.MeshStandardMaterial({ map: awningTexture('#' + s.awning.toString(16).padStart(6, '0'), '#f0ead8'), side: THREE.DoubleSide, roughness: 0.9 }));
+    awn.position.y = 2.6; awn.rotation.x = -Math.PI / 2 + 0.25; g.add(awn);
+    for (const [lx, lz] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.25, 2.6, 0.25), new THREE.MeshStandardMaterial({ color: 0x5a4a34 }));
+      leg.position.set(lx * (s.w / 2 - 0.3), 1.3, lz * (s.d / 2 - 0.3)); g.add(leg);
+    }
+    const goods = new THREE.Mesh(new THREE.BoxGeometry(s.w * 0.8, 0.4, s.d * 0.7),
+      new THREE.MeshStandardMaterial({ color: s.goods === 'fish' ? 0x7ab0c0 : s.goods === 'fruit' ? 0xe08a3c : s.goods === 'cloth' ? 0xc05a8a : 0xd0b060, roughness: 0.9 }));
+    goods.position.y = 1.45; g.add(goods);
+    g.position.set(s.x, 0, s.z); scene.add(g);
+  }
+  for (const p of world.props) {
+    let m;
+    if (p.kind === 'crate') m = new THREE.Mesh(new THREE.BoxGeometry(1.6 * p.s, 1.6 * p.s, 1.6 * p.s), new THREE.MeshStandardMaterial({ color: 0x9a7a4a, roughness: 0.95 }));
+    else if (p.kind === 'barrel') m = new THREE.Mesh(new THREE.CylinderGeometry(0.7 * p.s, 0.7 * p.s, 1.5 * p.s, 10), new THREE.MeshStandardMaterial({ color: 0x7a5a3a, roughness: 0.9 }));
+    else if (p.kind === 'basket') m = new THREE.Mesh(new THREE.CylinderGeometry(0.9 * p.s, 0.6 * p.s, 0.7 * p.s, 10), new THREE.MeshStandardMaterial({ color: 0xb09a5a, roughness: 0.95 }));
+    else m = new THREE.Mesh(new THREE.BoxGeometry(1.4 * p.s, 1 * p.s, 1.4 * p.s), new THREE.MeshStandardMaterial({ color: 0x5a8a4a, roughness: 0.95 }));
+    m.position.set(p.x, (p.kind === 'crate' ? 0.8 : p.kind === 'barrel' ? 0.75 : 0.35) * p.s, p.z);
+    m.rotation.y = p.rot; m.castShadow = true; scene.add(m);
   }
 
-  function drawCarShape(x, y, angle, color, isPolice, time) {
-    // Soft shadow in world space, so it stays put when the car turns.
-    context.fillStyle = PALETTE.shadow;
-    context.beginPath();
-    context.ellipse(x + 3, y + 5, 24, 13, 0, 0, Math.PI * 2);
-    context.fill();
-    context.save();
-    context.translate(x, y);
-    context.rotate(angle);
-    // Wheels.
-    context.fillStyle = '#16181c';
-    context.fillRect(-17, -13, 10, 5);
-    context.fillRect(7, -13, 10, 5);
-    context.fillRect(-17, 8, 10, 5);
-    context.fillRect(7, 8, 10, 5);
-    // Body with rounded corners.
-    context.fillStyle = color;
-    rrect(-22, -11, 44, 22, 6);
-    context.fill();
-    // Roof and glass.
-    context.fillStyle = 'rgba(0,0,0,0.22)';
-    rrect(-8, -9, 16, 18, 4);
-    context.fill();
-    context.fillStyle = 'rgba(20,28,40,0.85)';
-    rrect(8, -8, 7, 16, 2);
-    context.fill();
-    context.fillStyle = 'rgba(20,28,40,0.7)';
-    rrect(-16, -8, 6, 16, 2);
-    context.fill();
-    // Headlights and taillights.
-    context.fillStyle = '#ffe9a0';
-    context.fillRect(20, -9, 3, 4);
-    context.fillRect(20, 5, 3, 4);
-    context.fillStyle = '#e5534b';
-    context.fillRect(-23, -9, 3, 4);
-    context.fillRect(-23, 5, 3, 4);
-    if (isPolice) {
-      // White body stripe and a flashing light bar on the roof.
-      context.fillStyle = '#f2f0e8';
-      context.fillRect(-2, -11, 8, 22);
-      const blink = Math.floor(time * 4) % 2 === 0;
-      context.fillStyle = blink ? '#ff5a50' : '#5a9aff';
-      context.fillRect(-4, -6, 8, 5);
-      context.fillStyle = blink ? '#5a9aff' : '#ff5a50';
-      context.fillRect(-4, 1, 8, 5);
+  // ---- Palms + streetlamps + traffic lights.
+  for (const palm of world.palms) {
+    const g = new THREE.Group();
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, palm.h, 7), new THREE.MeshStandardMaterial({ color: 0x7a5a3a, roughness: 1 }));
+    trunk.position.y = palm.h / 2; trunk.castShadow = true; g.add(trunk);
+    for (let i = 0; i < 6; i++) {
+      const frond = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.15, 1.1), new THREE.MeshStandardMaterial({ color: 0x3a8a4a, roughness: 1 }));
+      frond.position.y = palm.h; frond.rotation.y = (i / 6) * Math.PI * 2; frond.rotation.z = 0.5;
+      frond.translateX(1.8); g.add(frond);
     }
-    context.restore();
+    g.position.set(palm.x, 0, palm.z); scene.add(g);
   }
-
-  function drawWorld(world, state, cam) {
-    const { buildings, palms, groundPatches, speckles, sandSpeckles, waves, parks, plaza, roundabout, streetlights, signs, boats } = world;
-    const t = state.time;
-    // Water around the island, with a sand beach and grass inside.
-    context.fillStyle = PALETTE.water;
-    context.fillRect(0, 0, WORLD.width, WORLD.height);
-    context.fillStyle = PALETTE.waterDeep;
-    context.fillRect(0, 0, WORLD.width, 26);
-    context.fillRect(0, WORLD.height - 26, WORLD.width, 26);
-    context.fillRect(0, 0, 26, WORLD.height);
-    context.fillRect(WORLD.width - 26, 0, 26, WORLD.height);
-    // Gentle wave arcs just off the sand.
-    context.strokeStyle = 'rgba(242,240,232,0.35)';
-    context.lineWidth = 2;
-    for (const w of waves) {
-      context.beginPath();
-      context.arc(w.x, w.y, w.r, 0.15 * Math.PI, 0.85 * Math.PI);
-      context.stroke();
-    }
-    context.lineWidth = 1;
-    context.fillStyle = PALETTE.sand;
-    context.fillRect(50, 50, WORLD.width - 100, WORLD.height - 100);
-    for (const s of sandSpeckles) {
-      context.fillStyle = s.color;
-      context.fillRect(s.x, s.y, 3, 3);
-    }
-    context.fillStyle = PALETTE.grass;
-    context.fillRect(150, 150, WORLD.width - 300, WORLD.height - 300);
-    // Varied ground: dry patches and grass speckles, never one flat fill.
-    for (const patch of groundPatches) {
-      context.fillStyle = patch.color;
-      context.globalAlpha = 0.5;
-      context.beginPath();
-      context.ellipse(patch.x, patch.y, patch.rx, patch.ry, 0, 0, Math.PI * 2);
-      context.fill();
-    }
-    context.globalAlpha = 1;
-    for (const s of speckles) {
-      context.fillStyle = s.color;
-      context.fillRect(s.x, s.y, 3, 3);
-    }
-    // District washes.
-    for (const d of DISTRICTS) {
-      context.fillStyle = d.tint;
-      context.globalAlpha = 0.16;
-      context.fillRect(d.x0, d.y0, d.x1 - d.x0, d.y1 - d.y0);
-      context.globalAlpha = 1;
-    }
-    // Parks: paths, trees, bushes.
-    for (const park of parks) {
-      for (const path of park.paths) {
-        context.fillStyle = PALETTE.parkPath;
-        context.fillRect(path.x, path.y, path.w, path.h);
-      }
-      for (const tree of park.trees) drawTree(tree.x, tree.y, tree.r, tree.color, false);
-      for (const bush of park.bushes) {
-        circle(bush.x, bush.y, bush.r, PALETTE.bush);
-        circle(bush.x - bush.r * 0.3, bush.y - bush.r * 0.3, bush.r * 0.55, '#3f7a3a');
-      }
-    }
-    // Sidewalks with curbs, then the asphalt, edge lines and centre dashes.
-    context.fillStyle = PALETTE.sidewalk;
-    for (const rx of ROADS_X) context.fillRect(rx - ROAD_W / 2 - 18, 150, ROAD_W + 36, WORLD.height - 300);
-    for (const ry of ROADS_Y) context.fillRect(150, ry - ROAD_W / 2 - 18, WORLD.width - 300, ROAD_W + 36);
-    context.fillStyle = PALETTE.curb;
-    for (const rx of ROADS_X) {
-      context.fillRect(rx - ROAD_W / 2 - 18, 150, 3, WORLD.height - 300);
-      context.fillRect(rx + ROAD_W / 2 + 15, 150, 3, WORLD.height - 300);
-    }
-    for (const ry of ROADS_Y) {
-      context.fillRect(150, ry - ROAD_W / 2 - 18, WORLD.width - 300, 3);
-      context.fillRect(150, ry + ROAD_W / 2 + 15, WORLD.width - 300, 3);
-    }
-    context.fillStyle = PALETTE.road;
-    for (const rx of ROADS_X) context.fillRect(rx - ROAD_W / 2, 150, ROAD_W, WORLD.height - 300);
-    for (const ry of ROADS_Y) context.fillRect(150, ry - ROAD_W / 2, WORLD.width - 300, ROAD_W);
-    context.fillStyle = PALETTE.roadEdge;
-    for (const rx of ROADS_X) {
-      context.fillRect(rx - ROAD_W / 2 + 5, 150, 2, WORLD.height - 300);
-      context.fillRect(rx + ROAD_W / 2 - 7, 150, 2, WORLD.height - 300);
-    }
-    for (const ry of ROADS_Y) {
-      context.fillRect(150, ry - ROAD_W / 2 + 5, WORLD.width - 300, 2);
-      context.fillRect(150, ry + ROAD_W / 2 - 7, WORLD.width - 300, 2);
-    }
-    context.fillStyle = PALETTE.roadLine;
-    for (const rx of ROADS_X) {
-      for (let y = 170; y < WORLD.height - 170; y += 64) context.fillRect(rx - 2, y, 4, 30);
-    }
-    for (const ry of ROADS_Y) {
-      for (let x = 170; x < WORLD.width - 170; x += 64) context.fillRect(x, ry - 2, 30, 4);
-    }
-    // Crosswalks at every intersection: stripes across the road on two approaches.
-    context.fillStyle = PALETTE.crosswalk;
-    for (const rx of ROADS_X) {
-      for (const ry of ROADS_Y) {
-        for (let i = 0; i < 5; i += 1) {
-          context.fillRect(rx - ROAD_W / 2 + 8 + i * 20, ry - ROAD_W / 2 - 26, 10, 14);
-          context.fillRect(rx - ROAD_W / 2 - 26, ry - ROAD_W / 2 + 8 + i * 20, 14, 10);
-        }
-      }
-    }
-    // The roundabout: a paved ring with a grass island and a tree in the middle.
-    context.fillStyle = PALETTE.sidewalk;
-    context.beginPath();
-    context.arc(roundabout.x, roundabout.y, roundabout.r, 0, Math.PI * 2);
-    context.fill();
-    context.fillStyle = PALETTE.road;
-    context.beginPath();
-    context.arc(roundabout.x, roundabout.y, roundabout.r - 12, 0, Math.PI * 2);
-    context.fill();
-    context.fillStyle = PALETTE.grass;
-    context.beginPath();
-    context.arc(roundabout.x, roundabout.y, 26, 0, Math.PI * 2);
-    context.fill();
-    drawTree(roundabout.x, roundabout.y, 16, '#3f7a3a', false);
-    // The plaza: a paved square with tile joints, benches and corner trees.
-    context.fillStyle = PALETTE.plaza;
-    context.fillRect(plaza.x, plaza.y, plaza.w, plaza.h);
-    context.strokeStyle = 'rgba(0,0,0,0.12)';
-    for (let gx = plaza.x + 40; gx < plaza.x + plaza.w; gx += 40) {
-      context.beginPath();
-      context.moveTo(gx, plaza.y);
-      context.lineTo(gx, plaza.y + plaza.h);
-      context.stroke();
-    }
-    for (let gy = plaza.y + 40; gy < plaza.y + plaza.h; gy += 40) {
-      context.beginPath();
-      context.moveTo(plaza.x, gy);
-      context.lineTo(plaza.x + plaza.w, gy);
-      context.stroke();
-    }
-    for (const bench of plaza.benches) {
-      context.fillStyle = '#7a5a3a';
-      context.fillRect(bench.x, bench.y, bench.w, bench.h);
-    }
-    for (const tree of plaza.trees) drawTree(tree.x, tree.y, tree.r, tree.color, false);
-    // The marina basin: water, docks, moored boats.
-    context.fillStyle = PALETTE.water;
-    context.fillRect(MARINA_BASIN.x, MARINA_BASIN.y, MARINA_BASIN.w, MARINA_BASIN.h);
-    context.fillStyle = PALETTE.waterDeep;
-    context.fillRect(MARINA_BASIN.x, MARINA_BASIN.y, MARINA_BASIN.w, 8);
-    for (const boat of boats) {
-      if (boat.dock) {
-        context.fillStyle = PALETTE.dock;
-        context.fillRect(boat.x, boat.y, boat.len, 14);
-        continue;
-      }
-      drawBoat(boat);
-    }
-    // Buildings: soft shadow, varied roof, parapet edge, rooftop clutter — no window grids.
-    for (const b of buildings) {
-      context.fillStyle = PALETTE.shadow;
-      for (const part of b.parts) {
-        rrect(part.x + 6, part.y + 8, part.w, part.h, 4);
-        context.fill();
-      }
-      for (const part of b.parts) {
-        context.fillStyle = b.roof;
-        rrect(part.x, part.y, part.w, part.h, 4);
-        context.fill();
-        context.strokeStyle = PALETTE.parapet;
-        context.lineWidth = 3;
-        rrect(part.x + 4, part.y + 4, part.w - 8, part.h - 8, 3);
-        context.stroke();
-        context.lineWidth = 1;
-      }
-      for (const f of b.features) {
-        if (f.type === 'ac') {
-          context.fillStyle = '#9a9a92';
-          context.fillRect(f.x, f.y, f.w, f.h);
-          context.fillStyle = '#6a6a62';
-          context.fillRect(f.x + 2, f.y + 2, f.w - 4, 2);
-        } else if (f.type === 'vent') {
-          circle(f.x + f.w / 2, f.y + f.h / 2, Math.min(f.w, f.h) / 2, '#5a5a52');
-        } else {
-          context.fillStyle = PALETTE.skylight;
-          context.fillRect(f.x, f.y, f.w, f.h);
-          context.fillStyle = 'rgba(255,255,255,0.5)';
-          context.fillRect(f.x, f.y, f.w, 2);
-        }
-      }
-    }
-    // Trees and bushes.
-    for (const palm of palms) {
-      if (palm.kind === 'bush') {
-        circle(palm.x, palm.y, palm.r, PALETTE.bush);
-        circle(palm.x - palm.r * 0.3, palm.y - palm.r * 0.3, palm.r * 0.55, '#3f7a3a');
-      } else {
-        drawTree(palm.x, palm.y, palm.r, palm.color, palm.kind === 'palm');
-      }
-    }
-    // Streetlights and signs.
-    for (const light of streetlights) {
-      circle(light.x, light.y, 2, '#2a2a30');
-      circle(light.x, light.y, 1.5, '#d8d8c8');
-    }
-    for (const sign of signs) {
-      context.fillStyle = '#2a2a30';
-      context.fillRect(sign.x - 1, sign.y - 1, 2, 12);
-      context.fillStyle = sign.color;
-      context.fillRect(sign.x - 7, sign.y - 9, 14, 9);
-    }
-    // District names, faded on the ground.
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    for (const d of DISTRICTS) {
-      const cx = (d.x0 + d.x1) / 2;
-      const cy = (d.y0 + d.y1) / 2;
-      text(d.name.toUpperCase(), cx, cy, 44, 'rgba(255,255,255,0.20)', 'center', 'middle');
-    }
-    // Garage and landmark plaques.
-    context.fillStyle = '#22262e';
-    context.fillRect(GARAGE.x - 60, GARAGE.y - 40, 120, 80);
-    text('GARAGE', GARAGE.x, GARAGE.y + 5, 20, PALETTE.gold, 'center', 'middle');
-    const plaques = [
-      { x: BANK.x, y: BANK.y, label: 'BANK', color: '#f2c94c' },
-      { x: CASINO.x, y: CASINO.y, label: 'CASINO', color: '#c94fb5' },
-      { x: FIXER.x, y: FIXER.y, label: 'CLEO', color: '#e5534b' },
-      { x: SAFEHOUSE.x, y: SAFEHOUSE.y, label: 'SAFEHOUSE', color: '#7ac94f' },
-    ];
-    for (const plaque of plaques) {
-      context.fillStyle = 'rgba(16,18,24,0.85)';
-      context.fillRect(plaque.x - 44, plaque.y - 13, 88, 26);
-      context.strokeStyle = plaque.color;
-      context.lineWidth = 2;
-      context.strokeRect(plaque.x - 44, plaque.y - 13, 88, 26);
-      context.lineWidth = 1;
-      text(plaque.label, plaque.x, plaque.y, 13, plaque.color, 'center', 'middle');
-    }
-    // Roadblocks.
-    for (const block of state.roadblocks) {
-      context.save();
-      context.translate(block.x, block.y);
-      context.rotate(block.angle);
-      context.fillStyle = '#e5534b';
-      context.fillRect(-60, -8, 120, 16);
-      context.fillStyle = '#f2f0e8';
-      for (let x = -60; x < 60; x += 24) context.fillRect(x, -8, 12, 16);
-      context.restore();
-    }
-    // Convoy trucks and the ghost coupe.
-    for (const truck of state.convoy) drawCarShape(truck.x, truck.y, truck.angle, '#c9a13b', false, t);
-    if (state.ghost) drawCarShape(state.ghost.x, state.ghost.y, state.ghost.angle, '#22262e', false, t);
-    // Traffic, parked and garage cars.
-    for (const car of state.cars) {
-      if (car.kind === 'wreck') {
-        context.save();
-        context.translate(car.x, car.y);
-        context.rotate(car.angle);
-        context.fillStyle = '#333';
-        rrect(-22, -11, 44, 22, 6);
-        context.fill();
-        context.fillStyle = 'rgba(0,0,0,0.4)';
-        rrect(-8, -9, 16, 18, 4);
-        context.fill();
-        context.restore();
-        continue;
-      }
-      drawCarShape(car.x, car.y, car.angle, car.color, false, t);
-    }
-    // Cruisers.
-    for (const cop of state.cruisers) {
-      if (cop.dead) continue;
-      drawCarShape(cop.x, cop.y, cop.angle, PALETTE.police, true, t);
-    }
-    // Pedestrians, with a shadow and a facing tick.
-    for (const ped of state.peds) {
-      context.fillStyle = PALETTE.shadow;
-      context.beginPath();
-      context.ellipse(ped.x + 2, ped.y + 3, 8, 5, 0, 0, Math.PI * 2);
-      context.fill();
-      circle(ped.x, ped.y, 7, ped.color);
-      circle(ped.x, ped.y - 4, 4, '#d8b48a');
-      context.strokeStyle = 'rgba(0,0,0,0.35)';
-      context.beginPath();
-      context.moveTo(ped.x, ped.y);
-      context.lineTo(ped.x + Math.cos(ped.angle) * 10, ped.y + Math.sin(ped.angle) * 10);
-      context.stroke();
-    }
-    // The player: on foot a person, in a car the car itself with a marker.
-    const p = state.player;
-    if (p.inCar) {
-      drawCarShape(p.x, p.y, p.angle, p.inCar.color, false, t);
-      context.strokeStyle = PALETTE.gold;
-      context.lineWidth = 3;
-      context.beginPath();
-      context.arc(p.x, p.y, 30, 0, Math.PI * 2);
-      context.stroke();
-      context.lineWidth = 1;
-    } else {
-      context.fillStyle = PALETTE.shadow;
-      context.beginPath();
-      context.ellipse(p.x + 2, p.y + 3, 14, 8, 0, 0, Math.PI * 2);
-      context.fill();
-      circle(p.x, p.y, 13, '#e8b13c');
-      circle(p.x, p.y - 5, 6, '#d8b48a');
-      // Aim line for the held weapon.
-      const wx = p.x + Math.cos(p.aimAngle) * 60;
-      const wy = p.y + Math.sin(p.aimAngle) * 60;
-      context.strokeStyle = 'rgba(242,240,232,0.6)';
-      context.beginPath();
-      context.moveTo(p.x, p.y);
-      context.lineTo(wx, wy);
-      context.stroke();
-      circle(wx, wy, 3, PALETTE.gold);
-    }
-    // Objective marker.
-    if (state.objective) {
-      const o = state.objective;
-      context.strokeStyle = PALETTE.gold;
-      context.lineWidth = 3;
-      context.beginPath();
-      context.arc(o.x, o.y, 26 + 6 * Math.sin(t * 4), 0, Math.PI * 2);
-      context.stroke();
-      context.lineWidth = 1;
-      context.fillStyle = PALETTE.gold;
-      context.beginPath();
-      context.moveTo(o.x, o.y - 40);
-      context.lineTo(o.x - 10, o.y - 22);
-      context.lineTo(o.x + 10, o.y - 22);
-      context.closePath();
-      context.fill();
-    }
-    // Time of day wash.
-    if (state.timeOfDay === 2) {
-      context.fillStyle = PALETTE.night;
-      context.fillRect(cam.x - 700, cam.y - 400, 1400, 800);
-    } else if (state.timeOfDay === 1) {
-      context.fillStyle = PALETTE.dusk;
-      context.fillRect(cam.x - 700, cam.y - 400, 1400, 800);
-    }
-    // Lights over the wash: the heli and its spotlight, streetlight pools, the player's
-    // headlight cone, and a few lit windows on the rooftops at night.
-    if (state.heli) {
-      const h = state.heli;
-      context.fillStyle = 'rgba(240,230,140,0.12)';
-      context.beginPath();
-      context.moveTo(h.x, h.y);
-      context.lineTo(state.player.x - 90, state.player.y + 60);
-      context.lineTo(state.player.x + 90, state.player.y + 60);
-      context.closePath();
-      context.fill();
-      circle(h.x, h.y, 26, '#22262e');
-      context.strokeStyle = '#f2f0e8';
-      context.lineWidth = 3;
-      context.beginPath();
-      context.moveTo(h.x - 34, h.y);
-      context.lineTo(h.x + 34, h.y);
-      context.stroke();
-      context.lineWidth = 1;
-    }
-    if (state.timeOfDay > 0) {
-      for (const light of streetlights) {
-        if (Math.abs(light.x - cam.x) > 700 || Math.abs(light.y - cam.y) > 400) continue;
-        context.fillStyle = PALETTE.glowWarm;
-        context.beginPath();
-        context.arc(light.x, light.y, 16, 0, Math.PI * 2);
-        context.fill();
-      }
-      if (p.inCar) {
-        context.fillStyle = 'rgba(240,230,140,0.14)';
-        context.beginPath();
-        context.moveTo(p.x, p.y);
-        const a = p.angle;
-        context.lineTo(p.x + Math.cos(a - 0.28) * 260, p.y + Math.sin(a - 0.28) * 260);
-        context.lineTo(p.x + Math.cos(a + 0.28) * 260, p.y + Math.sin(a + 0.28) * 260);
-        context.closePath();
-        context.fill();
-      }
-      if (state.timeOfDay === 2) {
-        for (const b of buildings) {
-          if (Math.abs(b.x + b.w / 2 - cam.x) > 700 || Math.abs(b.y + b.h / 2 - cam.y) > 400) continue;
-          for (let i = 0; i < 3; i += 1) {
-            if (hash2(Math.round(b.x) + i * 57, Math.round(b.y) + i * 31) % 2 === 0) {
-              context.fillStyle = 'rgba(255,200,90,0.75)';
-              const wx = b.x + 14 + ((hash2(Math.round(b.x) + i * 13, 7) % 60) / 60) * Math.max(1, b.w - 28);
-              const wy = b.y + 14 + ((hash2(Math.round(b.y) + i * 17, 11) % 60) / 60) * Math.max(1, b.h - 28);
-              context.fillRect(wx, wy, 5, 5);
-            }
-          }
-        }
-      }
-    }
+  const lampMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.8 });
+  const glowMat = new THREE.MeshBasicMaterial({ color: 0xffe8a0 });
+  for (const lamp of world.streetlamps) {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.16, 7, 6), lampMat);
+    pole.position.set(lamp.x, 3.5, lamp.z); scene.add(pole);
+    const glow = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 6), glowMat);
+    glow.position.set(lamp.x, 7, lamp.z); scene.add(glow);
   }
-
-  function drawMinimap(state, cam) {
-    const mw = 220;
-    const mh = 165;
-    const mx = VIEW_W - mw - 16;
-    const my = 16;
-    const sx = mw / WORLD.width;
-    const sy = mh / WORLD.height;
-    context.fillStyle = 'rgba(10,12,16,0.75)';
-    context.fillRect(mx - 4, my - 4, mw + 8, mh + 8);
-    context.fillStyle = '#3d7ea6';
-    context.fillRect(mx, my, mw, mh);
-    context.fillStyle = '#6f9e5e';
-    context.fillRect(mx + 150 * sx, my + 150 * sy, (WORLD.width - 300) * sx, (WORLD.height - 300) * sy);
-    context.fillStyle = '#3d7ea6';
-    context.fillRect(mx + MARINA_BASIN.x * sx, my + MARINA_BASIN.y * sy, MARINA_BASIN.w * sx, MARINA_BASIN.h * sy);
-    context.fillStyle = '#3a3a42';
-    for (const rx of ROADS_X) context.fillRect(mx + rx * sx - 1, my, 2, mh);
-    for (const ry of ROADS_Y) context.fillRect(mx, my + ry * sy - 1, mw, 2);
-    if (state.objective) {
-      circle(mx + state.objective.x * sx, my + state.objective.y * sy, 4, PALETTE.gold);
-    }
-    for (const cop of state.cruisers) {
-      if (!cop.dead) circle(mx + cop.x * sx, my + cop.y * sy, 3, '#e5534b');
-    }
-    if (state.heli) circle(mx + state.heli.x * sx, my + state.heli.y * sy, 4, '#e5534b');
-    circle(mx + state.player.x * sx, my + state.player.y * sy, 4, '#ffffff');
-    // Viewport box.
-    context.strokeStyle = 'rgba(255,255,255,0.5)';
-    context.strokeRect(mx + (cam.x - 640) * sx, my + (cam.y - 360) * sy, 1280 * sx, 720 * sy);
-  }
-
-  function drawHud(state, world, cam) {
-    const p = state.player;
-    const stars = Math.min(5, Math.floor(state.heat / 20));
-    // Cash and district.
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(12, 12, 210, 64);
-    text(`$${state.cash}`, 24, 40, 30, '#5ee08a', 'left', 'top');
-    const district = world.districtAt(p.x, p.y);
-    text(district.name, 24, 66, 16, PALETTE.muted, 'left', 'top');
-    // Wanted stars.
-    for (let i = 0; i < 5; i += 1) {
-      text('★', 240 + i * 26, 40, 28, i < stars ? PALETTE.gold : 'rgba(255,255,255,0.25)', 'left', 'top');
-    }
-    // Mission banner.
-    if (state.bannerTimer > 0 && state.banner) {
-      const w = Math.min(760, 40 + state.banner.length * 9);
-      context.fillStyle = PALETTE.panel;
-      context.fillRect((VIEW_W - w) / 2, 12, w, 52);
-      text(state.banner, VIEW_W / 2, 38, 19, PALETTE.text, 'center', 'top');
-    }
-    // Objective label under the banner.
-    if (state.objective) {
-      text(state.objective.label, VIEW_W / 2, 78, 18, PALETTE.gold, 'center', 'top');
-    }
-    drawMinimap(state, cam);
-    // Weapon slots.
-    const weapons = ['Fists', 'Pistol', 'SMG'];
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(12, VIEW_H - 64, 300, 44);
-    for (let i = 0; i < 3; i += 1) {
-      const ammo = state.ammo[i] === Infinity ? '∞' : String(state.ammo[i]);
-      text(`${i + 1} ${weapons[i]} ${ammo}`, 24 + i * 100, VIEW_H - 34, 17, i === state.weapon ? PALETTE.gold : PALETTE.muted, 'left', 'top');
-    }
-    // Health, speed, radio.
-    text(`Health ${Math.max(0, Math.round(p.health))}`, 330, VIEW_H - 34, 17, p.health > 40 ? PALETTE.text : PALETTE.red, 'left', 'top');
-    if (p.inCar) {
-      text(`${Math.round(Math.abs(p.speed) * 0.22)} mph`, VIEW_W - 240, VIEW_H - 34, 17, PALETTE.text, 'left', 'top');
-    }
-    text(`Radio: ${state.radioName || 'Sol Mar FM'}`, VIEW_W - 240, VIEW_H - 60, 15, PALETTE.muted, 'left', 'top');
-    text('WASD drive / walk   E enter car   Click shoot   1-3 weapons   R radio   G garage   P pause', VIEW_W / 2, VIEW_H - 24, 13, PALETTE.muted, 'center', 'top');
-    // Off-screen objective arrow.
-    if (state.objective) {
-      const o = state.objective;
-      const dx = o.x - cam.x;
-      const dy = o.y - cam.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist > 560) {
-        const ax = VIEW_W / 2 + (dx / dist) * 420;
-        const ay = VIEW_H / 2 + (dy / dist) * 260;
-        const ang = Math.atan2(dy, dx);
-        context.save();
-        context.translate(ax, ay);
-        context.rotate(ang);
-        context.fillStyle = PALETTE.gold;
-        context.beginPath();
-        context.moveTo(18, 0);
-        context.lineTo(-10, -12);
-        context.lineTo(-10, 12);
-        context.closePath();
-        context.fill();
-        context.restore();
-        text(`${Math.round(dist / 50) * 50}m`, ax, ay + 26, 15, PALETTE.gold, 'center', 'top');
-      }
-    }
-  }
-
-  function drawPanel(title, lines, prompt) {
-    const width = 640;
-    const height = 150 + lines.length * 32 + 70;
-    const x = (VIEW_W - width) / 2;
-    const y = (VIEW_H - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, width, height);
-    text(title, VIEW_W / 2, y + 62, 44, PALETTE.text, 'center', 'top');
-    for (let i = 0; i < lines.length; i += 1) {
-      text(lines[i], VIEW_W / 2, y + 128 + i * 32, 20, PALETTE.muted, 'center', 'top');
-    }
-    text(prompt, VIEW_W / 2, y + height - 44, 22, PALETTE.gold, 'center', 'top');
-  }
-
-  function drawGarage(state, world, garage) {
-    context.fillStyle = 'rgba(8,10,14,0.72)';
-    context.fillRect(0, 0, VIEW_W, VIEW_H);
-    const width = 760;
-    const height = 560;
-    const x = (VIEW_W - width) / 2;
-    const y = (VIEW_H - height) / 2;
-    context.fillStyle = PALETTE.panel;
-    context.fillRect(x, y, width, height);
-    text('AZURA GARAGE', VIEW_W / 2, y + 44, 36, PALETTE.text, 'center', 'top');
-    text(`Cash $${state.cash}   Downtown standing ${state.standing.downtown}/5 — ${world.garageDiscount()}% off`, VIEW_W / 2, y + 88, 18, PALETTE.muted, 'center', 'top');
-    let rowY = y + 130;
-    CARS.forEach((car, i) => {
-      const owned = state.ownedCars.includes(car.id);
-      const price = Math.round(car.price * (1 - world.garageDiscount() / 100));
-      const sel = garage.selected === i;
-      const up = state.upgrades[car.id];
-      const upText = up ? `  Engine ${up.engine}/3  Tires ${up.tires}/3  Armor ${up.armor}/3` : '';
-      text(`${sel ? '>' : ' '} ${i + 1} ${car.name} — top ${car.top}${owned ? '  OWNED' + upText : `  $${price}`}`, x + 40, rowY, 20, sel ? PALETTE.gold : PALETTE.text, 'left', 'top');
-      rowY += 34;
+  for (const light of world.lights) {
+    const g = new THREE.Group();
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.18, 6.5, 6), lampMat);
+    pole.position.y = 3.25; g.add(pole);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.2, 0.2), lampMat);
+    arm.position.set(-1.2, 6.4, 0); g.add(arm);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1.9, 0.7), lampMat);
+    head.position.set(-2.4, 5.6, 0); g.add(head);
+    const lamps = {};
+    [['red', 6.15, 0xff2a2a], ['amber', 5.6, 0xffb02a], ['green', 5.05, 0x2aff5a]].forEach(([name, y, color]) => {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(0.26, 8, 6),
+        new THREE.MeshBasicMaterial({ color: 0x1a1a1a }));
+      m.position.set(-2.4, y, 0.4); m.userData.lampColor = color; g.add(m); lamps[name] = m;
     });
-    text('1-5 select a car (buy it if you can afford it) — Z engine, X tires, C armor for the selected car', VIEW_W / 2, y + height - 96, 17, PALETTE.muted, 'center', 'top');
-    text('G or Esc to leave the garage', VIEW_W / 2, y + height - 60, 18, PALETTE.gold, 'center', 'top');
+    g.position.set(light.x, 0, light.z);
+    scene.add(g);
+    dyn.lightHeads.push({ lamps, light });
   }
 
-  /** Paint one frame: the world, then the HUD or a panel for the screen the game is on. */
-  function draw(world, state, screen, best, garage) {
-    const p = state.player;
-    const cam = {
-      x: Math.max(640, Math.min(WORLD.width - 640, p.x)),
-      y: Math.max(360, Math.min(WORLD.height - 360, p.y)),
-    };
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.fillStyle = '#11141b';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(view.scale, 0, 0, view.scale, view.ox - cam.x * view.scale + (VIEW_W / 2) * view.scale, view.oy - cam.y * view.scale + (VIEW_H / 2) * view.scale);
-    drawWorld(world, state, cam);
-    context.setTransform(view.scale, 0, 0, view.scale, view.ox, view.oy);
-    if (screen === SCREEN_TITLE) {
-      context.fillStyle = 'rgba(8,10,14,0.55)';
-      context.fillRect(0, 0, VIEW_W, VIEW_H);
-      drawPanel('AZURA BAY', [
-        'A sun-soaked island. Eight jobs. One fixer: Abuela Cleo.',
-        'Steal cars, lose the tail, win the street race, take the casino.',
-        'WASD drive and walk — E enter a car — mouse to aim, click to shoot.',
-        `Missions done: ${state.missionsDone} of 8.`,
-      ], 'Press Space or click to start');
-      return;
+  // ---- Cars.
+  for (const car of world.cars) {
+    const g = new THREE.Group();
+    const isBus = car.type === 'bus', isKpd = car.type === 'kpd';
+    const len = isBus ? 9 : 4.4, wid = isBus ? 2.6 : 2, hgt = isBus ? 2.6 : 1.1;
+    const body = new THREE.Mesh(new THREE.BoxGeometry(wid, hgt, len),
+      new THREE.MeshStandardMaterial({ color: car.color, roughness: 0.5, metalness: 0.35 }));
+    body.position.y = 0.75; body.castShadow = true; g.add(body);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(wid * 0.85, isBus ? 1.1 : 0.7, len * (isBus ? 0.9 : 0.5)),
+      new THREE.MeshStandardMaterial({ color: 0x1a222e, roughness: 0.25, metalness: 0.5 }));
+    cabin.position.set(0, hgt + (isBus ? 0.4 : 0.25), isBus ? 0 : -0.3); g.add(cabin);
+    const wheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 10);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 1 });
+    for (const [wx, wz] of [[-0.95, 1.5], [0.95, 1.5], [-0.95, -1.5], [0.95, -1.5]]) {
+      const w = new THREE.Mesh(wheelGeo, wheelMat);
+      w.rotation.z = Math.PI / 2; w.position.set(wx, 0.42, wz); g.add(w); dyn.wheels.push(w);
     }
-    drawHud(state, world, cam);
-    if (screen === SCREEN_PAUSED) {
-      drawPanel('Paused', ['The island waits for you.'], 'Press P to keep playing');
-    } else if (screen === SCREEN_GARAGE) {
-      drawGarage(state, world, garage);
-    } else if (screen === SCREEN_OVER) {
-      drawPanel(state.overKind === 'busted' ? 'Busted' : 'Wasted', [
-        `Cash $${state.cash} — missions done ${state.missionsDone} of 8.`,
-        'The hospital and the fine both cost $200.',
-      ], 'Press Space to get back out there');
-    } else if (screen === SCREEN_WIN) {
-      drawPanel('AZURA BAY IS YOURS', [
-        'The Casino Score is done. Cleo is proud. The island is yours.',
-        `Cash $${state.cash} — all 8 missions done.`,
-      ], 'Press Space to keep cruising');
+    const hl = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.25, 0.15), new THREE.MeshBasicMaterial({ color: 0xfff2c0 }));
+    hl.position.set(0, 0.75, len / 2 + 0.05); g.add(hl);
+    const tl = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.25, 0.15), new THREE.MeshBasicMaterial({ color: 0xff2a2a }));
+    tl.position.set(0, 0.75, -len / 2 - 0.05); g.add(tl);
+    if (isKpd) {
+      const bar = new THREE.Group();
+      const r = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 0.3), new THREE.MeshBasicMaterial({ color: 0xff2a2a }));
+      r.position.x = -0.4; const b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.22, 0.3), new THREE.MeshBasicMaterial({ color: 0x2a6aff }));
+      b.position.x = 0.4; bar.add(r); bar.add(b);
+      bar.position.set(0, hgt + 0.75, 0); g.add(bar);
+      dyn.kpdBars.push({ r, b });
+      const door = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 0.6), new THREE.MeshBasicMaterial({ color: 0xf0f0f0 }));
+      door.position.set(wid / 2 + 0.02, 0.8, 0); door.rotation.y = Math.PI / 2; g.add(door);
     }
+    g.userData.car = car;
+    scene.add(g);
+    dyn.cars.push(g);
   }
 
-  resize();
-  window.addEventListener('resize', resize);
-  return { draw };
+  // ---- Pedestrians (blocky, shirt-colored, swinging limbs).
+  for (const ped of world.peds) {
+    const g = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.62 * ped.scale, 0.85, 0.36),
+      new THREE.MeshStandardMaterial({ color: ped.shirt, roughness: 0.9 }));
+    body.position.y = 1.15; body.castShadow = true; g.add(body);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.42, 0.42),
+      new THREE.MeshStandardMaterial({ color: ped.skin, roughness: 0.9 }));
+    head.position.y = 1.85; g.add(head);
+    const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.75, 0.22), new THREE.MeshStandardMaterial({ color: 0x2a2a2e }));
+    legL.position.set(-0.16, 0.38, 0); legL.geometry.translate(0, -0.32, 0); g.add(legL);
+    const legR = legL.clone(); legR.position.x = 0.16; g.add(legR);
+    const armL = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.7, 0.18), new THREE.MeshStandardMaterial({ color: ped.shirt }));
+    armL.position.set(-0.42, 1.45, 0); armL.geometry.translate(0, -0.3, 0); g.add(armL);
+    const armR = armL.clone(); armR.position.x = 0.42; g.add(armR);
+    g.position.set(ped.x, 0, ped.z);
+    g.userData.ped = ped; g.userData.legL = legL; g.userData.legR = legR; g.userData.armL = armL; g.userData.armR = armR;
+    scene.add(g);
+    dyn.peds.push(g);
+  }
+
+  // ---- Heli + spotlight cone.
+  const heli = new THREE.Group();
+  const hbody = new THREE.Mesh(new THREE.BoxGeometry(4.2, 1.6, 2.2), new THREE.MeshStandardMaterial({ color: 0x1a1a1e, roughness: 0.5, metalness: 0.4 }));
+  hbody.castShadow = true; heli.add(hbody);
+  const tail = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.5, 0.5), new THREE.MeshStandardMaterial({ color: 0x1a1a1e }));
+  tail.position.set(-3.4, 0.3, 0); heli.add(tail);
+  const rotor = new THREE.Mesh(new THREE.BoxGeometry(9, 0.08, 0.5), new THREE.MeshStandardMaterial({ color: 0x333333 }));
+  rotor.position.y = 1.1; heli.add(rotor);
+  dyn.heliRotor = rotor; dyn.heli = heli;
+  heli.position.set(world.heli.x, world.heli.y, world.heli.z);
+  scene.add(heli);
+  // Spotlight cone: apex up at the heli, base down on the ground. Height is scaled
+  // to the heli's altitude every frame, so the beam always reaches the street.
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(5, 30, 20, 1, true),
+    new THREE.MeshBasicMaterial({ color: 0xfff2c0, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }));
+  dyn.cone = cone; scene.add(cone);
+
+  // ---- Hero (the player): red-shirted pedestrian + own car. update() shows one
+  // of them at the player position; a stolen traffic car shows its own mesh instead.
+  const heroPed = new THREE.Group();
+  const hBody = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.9, 0.38),
+    new THREE.MeshStandardMaterial({ color: 0xe03030, roughness: 0.9 }));
+  hBody.position.y = 1.15; hBody.castShadow = true; heroPed.add(hBody);
+  const hHead = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.44, 0.44),
+    new THREE.MeshStandardMaterial({ color: 0xe8b88a, roughness: 0.9 }));
+  hHead.position.y = 1.88; heroPed.add(hHead);
+  const hLegL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.75, 0.22), new THREE.MeshStandardMaterial({ color: 0x2a2a2e }));
+  hLegL.position.set(-0.16, 0.38, 0); hLegL.geometry.translate(0, -0.32, 0); heroPed.add(hLegL);
+  const hLegR = hLegL.clone(); hLegR.position.x = 0.16; heroPed.add(hLegR);
+  heroPed.visible = false; scene.add(heroPed); dyn.heroPed = heroPed;
+  dyn.heroLegL = hLegL; dyn.heroLegR = hLegR;
+  const heroCar = new THREE.Group();
+  const heroBodyMat = new THREE.MeshStandardMaterial({ color: world.player.car.color, roughness: 0.5, metalness: 0.35 });
+  const heroBody = new THREE.Mesh(new THREE.BoxGeometry(2, 1.1, 4.4), heroBodyMat);
+  heroBody.position.y = 0.75; heroBody.castShadow = true; heroCar.add(heroBody);
+  const heroCabin = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 2.2),
+    new THREE.MeshStandardMaterial({ color: 0x1a222e, roughness: 0.25, metalness: 0.5 }));
+  heroCabin.position.set(0, 1.45, -0.3); heroCar.add(heroCabin);
+  const heroWheelGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 10);
+  const heroWheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 1 });
+  for (const [wx, wz] of [[-0.95, 1.5], [0.95, 1.5], [-0.95, -1.5], [0.95, -1.5]]) {
+    const w = new THREE.Mesh(heroWheelGeo, heroWheelMat);
+    w.rotation.z = Math.PI / 2; w.position.set(wx, 0.42, wz); heroCar.add(w);
+  }
+  const heroHl = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.25, 0.15), new THREE.MeshBasicMaterial({ color: 0xfff2c0 }));
+  heroHl.position.set(0, 0.75, 2.25); heroCar.add(heroHl);
+  heroCar.visible = false; scene.add(heroCar); dyn.heroCar = heroCar; dyn.heroBodyMat = heroBodyMat;
+
+  return { ...game, dyn, update(dt, t) {
+    // Hero: pedestrian when on foot, own car when driving (a stolen car shows
+    // its own traffic mesh instead, so the hero car hides then).
+    const p = world.player;
+    const stolen = !!p.carRef;
+    dyn.heroPed.visible = p.onFoot;
+    dyn.heroCar.visible = !p.onFoot && !stolen;
+    if (p.onFoot) {
+      dyn.heroPed.position.set(p.x, 0, p.z);
+      dyn.heroPed.rotation.y = p.heading;
+      const s = Math.sin(t * 8) * (p.speed > 0.5 ? 0.5 : 0);
+      dyn.heroLegL.rotation.x = s; dyn.heroLegR.rotation.x = -s;
+    } else if (!stolen) {
+      dyn.heroCar.position.set(p.x, 0, p.z);
+      dyn.heroCar.rotation.y = p.heading;
+      dyn.heroBodyMat.color.setHex(p.car.color);
+    }
+    // Cars follow the sim (except the one the player is driving — main.js moves it).
+    for (const g of dyn.cars) {
+      if (g.userData.playerDriven) continue;
+      const c = g.userData.car;
+      g.position.set(c.x, 0, c.z);
+      g.rotation.y = c.heading;
+    }
+    // Peds walk with swing.
+    for (const g of dyn.peds) {
+      const p = g.userData.ped;
+      g.position.set(p.x, 0, p.z);
+      g.rotation.y = p.heading;
+      const s = Math.sin(p.phase) * 0.55;
+      g.userData.legL.rotation.x = s; g.userData.legR.rotation.x = -s;
+      g.userData.armL.rotation.x = -s * 0.7; g.userData.armR.rotation.x = s * 0.7;
+    }
+    // Heli orbit + rotor + spotlight cone from the heli down to the street.
+    dyn.heli.position.set(world.heli.x, world.heli.y, world.heli.z);
+    dyn.heliRotor.rotation.y += dt * 22;
+    dyn.cone.scale.y = world.heli.y / 30;
+    dyn.cone.position.set(world.heli.x, world.heli.y / 2, world.heli.z);
+    // KPD light bars flash red/blue.
+    const on = Math.floor(t * 4) % 2 === 0;
+    for (const bar of dyn.kpdBars) {
+      bar.r.material.color.setHex(on ? 0xff2a2a : 0x551111);
+      bar.b.material.color.setHex(on ? 0x112255 : 0x2a6aff);
+    }
+    // Traffic lights follow the sim clock.
+    for (const lh of dyn.lightHeads) {
+      const state = trafficLightState(lh.light, t);
+      for (const [name, mesh] of Object.entries(lh.lamps)) {
+        mesh.material.color.setHex(name === state ? mesh.userData.lampColor : 0x1a1a1a);
+      }
+    }
+  } };
+}
+
+export function placeCamera(game, px, py, pz, lx, ly, lz) {
+  game.camera.position.set(px, py, pz);
+  game.camera.lookAt(lx, ly, lz);
+  game.camera.updateProjectionMatrix();
+}
+
+// Chase camera: behind the player (on foot: close; driving: further back, higher).
+export function chaseCamera(game, world) {
+  const p = world.player;
+  const back = p.onFoot ? 7 : 11;
+  const up = p.onFoot ? 3.2 : 4.6;
+  const hx = Math.sin(p.heading), hz = Math.cos(p.heading);
+  const cx = p.x - hx * back, cz = p.z - hz * back;
+  placeCamera(game, cx, up, cz, p.x + hx * 10, 1.6, p.z + hz * 10);
 }
