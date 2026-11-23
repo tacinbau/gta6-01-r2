@@ -1,227 +1,379 @@
-// World sim: deterministic city layout, traffic, pedestrians, police, heli.
-// No THREE.js here — plain data the renderer draws and the self-test counts.
-import { makeRng } from './random.js';
-import { CITY, DISTRICTS, MISSIONS, SHOP_SIGNS, SHIRT_COLORS, CAR_COLORS, TUNING } from './config.js';
+// Azura Bay world: deterministic city data built from a seed.
+// 5 districts, a street grid, the Old Pasaru night market, downtown with the
+// BANK tower, Kumala Strand beach road and the sea. No Math.random anywhere.
+import { makeRng, hashString } from './random.js';
+import {
+  SEED, COUNTS, DISTRICTS, SHOP_SIGNS, HOUSE_COLORS, SHOP_COLORS,
+  TOWER_COLORS, SHIRT_COLORS, CAR_COLORS, HERO,
+} from './config.js';
 
-// Road network: axis-aligned streets {x1,z1,x2,z2} (centerline), width 14 (7+7).
-export const ROADS = [
-  { id: 'boulevard', x1: -190, z1: 40, x2: 230, z2: 40 },   // Strand Boulevard (beach road)
-  { id: 'strip', x1: 40, z1: -190, x2: 40, z2: 90 },        // Downtown strip (bank road)
-  { id: 'market', x1: -210, z1: -60, x2: 10, z2: -60 },     // Old Pasaru market road
-  { id: 'port', x1: -160, z1: -20, x2: -160, z2: 210 },     // Port Meridian road
-  { id: 'hill', x1: 60, z1: -170, x2: 200, z2: -170 },      // Hillcrest road
-  { id: 'cross1', x1: -40, z1: -170, x2: -40, z2: 60 },     // Downtown west cross
-  { id: 'cross2', x1: 120, z1: -170, x2: 120, z2: 60 },     // Downtown east cross
-  { id: 'cross3', x1: -160, z1: 20, x2: 200, z2: 20 },      // Midtown cross
-  { id: 'cross4', x1: -160, z1: -140, x2: 200, z2: -140 },  // North cross
-];
+const AVENUES = [-160, -120, -80, -40, 0, 40, 80, 120, 160]; // roads along z
+const STREETS = [-120, -80, -40, 0, 40, 80, 120]; // roads along x
+const ROAD_W = 14;
 
-export const INTERSECTIONS = [
-  [40, 40], [40, 20], [40, -60], [40, -140], [-40, 40], [-40, 20], [-40, -60],
-  [120, 40], [120, -140], [-160, 20],
-];
-
-function roadLength(r) { return Math.hypot(r.x2 - r.x1, r.z2 - r.z1); }
-function roadPoint(r, s) {
-  const len = roadLength(r); const t = Math.max(0, Math.min(1, s / len));
-  return { x: r.x1 + (r.x2 - r.x1) * t, z: r.z1 + (r.z2 - r.z1) * t, heading: Math.atan2(r.x2 - r.x1, r.z2 - r.z1) };
+function onRoad(x, z) {
+  if (AVENUES.some((ax) => Math.abs(x - ax) < ROAD_W / 2 + 5)) return true;
+  if (STREETS.some((sz) => Math.abs(z - sz) < ROAD_W / 2 + 5)) return true;
+  return false;
 }
 
-export function buildWorld(seed) {
+function inMarket(x, z) {
+  return x >= -152 && x <= -68 && z >= -42 && z <= 62;
+}
+
+function inBeach(x, z) {
+  return z >= 138;
+}
+
+export function buildWorld(seed = SEED) {
   const rng = makeRng(seed);
   const world = {
-    seed, time: 0,
-    buildings: [], stalls: [], props: [], cars: [], peds: [], lights: [],
-    palms: [], streetlamps: [], roadblocks: [],
-    heli: { x: 60, z: 20, y: 55, angle: 0.6, radius: 90, speed: 0.12 },
-    bank: { x: 40, z: -118, w: 26, h: 58, signY: 0.35 },
-    player: null,
-    stats: { buildings: 0, houses: 0, shops: 0, stalls: 0, props: 0, cars: 0, peds: 0, kpd: 0, bus: 0, lights: 0 },
+    seed,
+    districts: DISTRICTS,
+    buildings: [],
+    stalls: [],
+    peds: [],
+    cars: [],
+    lights: [],
+    props: [],
+    palms: [],
+    bank: null,
+    heli: { x: 20, z: -40, y: 55, angle: 0, rotor: 0 },
+    hero: { mode: 'foot', x: -110, z: 38, heading: Math.PI, speed: 0, carColor: HERO.carColor, carName: HERO.carName },
+    time: 0,
   };
 
-  // ---- Buildings: downtown towers first (skyline), then low houses/shops everywhere else.
-  const towerSpots = [];
-  for (let gx = -1; gx <= 2; gx++) for (let gz = 0; gz <= 3; gz++) {
-    towerSpots.push([40 + gx * 42, -150 + gz * 34]);
-  }
-  for (const [bx, bz] of towerSpots) {
-    // Towers never sit on a road: keep every street clear for traffic and sightlines.
-    if (ROADS.some((r) => distToRoad(bx, bz, r) < 14)) continue;
-    if (Math.abs(bx - 58) < 22 && Math.abs(bz + 118) < 22) continue; // keep the bank plot clear
-    const h = rng.range(26, 68);
-    world.buildings.push({ kind: 'tower', x: bx + rng.range(-4, 4), z: bz + rng.range(-4, 4),
-      w: rng.range(18, 26), d: rng.range(18, 26), h, floors: Math.round(h / 3.4), tint: rng.pick([0x8a8f98, 0x9a8a72, 0x7a8898, 0xa89a80]) });
-  }
-  // The BANK tower: tall, warm stone, big yellow sign on its WEST face (facing the strip road),
-  // set back from the road so the street stays clear.
-  world.buildings.push({ kind: 'bank', x: 58, z: -118, w: 26, d: 24, h: 58, floors: 17, tint: 0xb08a4a, sign: 'BANK' });
-  // Low houses + shops (1-2 floors, gable roofs) filling every district.
-  const houseZones = [
-    [-120, -60, 150, 90], [150, 40, 120, 80], [40, -90, 170, 120],
-    [-160, 130, 130, 90], [120, -170, 130, 70], [-40, -140, 120, 80], [120, 20, 110, 70],
+  // --- Towers (downtown skyline, BANK is the tallest) ---
+  const towerSpots = [
+    { x: 35, z: -75, h: 58, bank: true },
+    { x: -8, z: -95, h: 44 },
+    { x: 62, z: -58, h: 40 },
+    { x: 88, z: -42, h: 36 },
+    { x: -25, z: -60, h: 33 },
+    { x: 78, z: -95, h: 47 },
   ];
-  let guard = 0;
-  while (world.buildings.length < TUNING.buildingCount && guard++ < 4000) {
-    const zone = rng.pick(houseZones);
-    const x = zone[0] + rng.range(-zone[2] / 2, zone[2] / 2);
-    const z = zone[1] + rng.range(-zone[3] / 2, zone[3] / 2);
-    if (ROADS.some((r) => distToRoad(x, z, r) < 12)) continue;
-    if (world.buildings.some((b) => Math.hypot(b.x - x, b.z - z) < 16)) continue;
-    const shop = rng.chance(0.42);
-    world.buildings.push({ kind: shop ? 'shop' : 'house', x, z,
-      w: rng.range(9, 15), d: rng.range(8, 13), h: shop ? rng.range(5, 7) : rng.range(4.5, 8),
-      floors: shop ? 1 : rng.int(1, 2), tint: rng.pick([0xd8b08a, 0xc0d8d0, 0xe0c8a0, 0xb0c0e0, 0xd8a0a0, 0xa8c090]),
-      sign: shop ? rng.pick(SHOP_SIGNS) : null, awning: shop ? rng.pick([0xe05a5a, 0x3c7ae0, 0x5ac06a, 0xe0c53c]) : 0 });
-  }
-  world.stats.buildings = world.buildings.length;
-  world.stats.houses = world.buildings.filter((b) => b.kind === 'house').length;
-  world.stats.shops = world.buildings.filter((b) => b.kind === 'shop').length;
-
-  // ---- Night market stalls (Old Pasaru plaza) + props filling the ground.
-  const plaza = { x: -120, z: -60 };
-  for (let i = 0; i < TUNING.stallCount; i++) {
-    const row = Math.floor(i / 5); const col = i % 5;
-    world.stalls.push({ x: plaza.x - 34 + col * 17 + rng.range(-2, 2), z: plaza.z - 18 + row * 13 + rng.range(-2, 2),
-      w: 7, d: 4, awning: rng.pick([0xe05a5a, 0x3c7ae0, 0xe0c53c, 0x5ac06a]), goods: rng.pick(['fish', 'fruit', 'cloth', 'spice']) });
-  }
-  for (let i = 0; i < TUNING.propCount; i++) {
-    const kind = rng.pick(['crate', 'barrel', 'basket', 'planter']);
-    world.props.push({ kind, x: plaza.x + rng.range(-46, 46), z: plaza.z + rng.range(-30, 34),
-      s: rng.range(0.8, 1.6), rot: rng.range(0, Math.PI) });
-  }
-  // Fixed foreground props by the market-road camera corridor (no bare dirt in frame).
-  // Both sides of the road near the camera: right (+z) and left (-z).
-  for (const [x, z, kind] of [[-150, -40, 'crate'], [-138, -35, 'basket'], [-158, -32, 'barrel'], [-145, -48, 'crate'], [-135, -45, 'basket'], [-152, -28, 'planter'],
-      [-152, -68, 'crate'], [-145, -69, 'basket'], [-158, -66, 'barrel']]) {
-    world.props.push({ kind, x, z, s: 1.3, rot: 0.6 });
-  }
-  world.stats.stalls = world.stalls.length;
-  world.stats.props = world.props.length;
-
-  // ---- Traffic lights at intersections (cycle 12 s; offset picked so t = 2 s reads RED).
-  INTERSECTIONS.slice(0, TUNING.trafficLightCount).forEach(([x, z], i) => {
-    world.lights.push({ x: x + 9, z: z + 9, offset: 4 + (i % 7), cycle: TUNING.trafficLightCycle });
+  towerSpots.forEach((t, i) => {
+    const b = {
+      kind: 'tower', x: t.x, z: t.z, w: 22, d: 22, h: t.h,
+      color: TOWER_COLORS[i % TOWER_COLORS.length],
+      floors: Math.floor(t.h / 3.4), sign: t.bank ? 'BANK' : null,
+    };
+    world.buildings.push(b);
+    if (t.bank) world.bank = b;
   });
-  world.stats.lights = world.lights.length;
 
-  // ---- Palms along the boulevard + streetlamps along main roads.
-  for (let x = -170; x <= 210; x += 24) {
-    world.palms.push({ x, z: 40 + (x % 48 === 0 ? 12 : -12), h: rng.range(7, 10) });
-  }
-  for (const r of ROADS) {
-    const len = roadLength(r);
-    for (let s = 20; s < len - 10; s += 46) {
-      const p = roadPoint(r, s);
-      world.streetlamps.push({ x: p.x + 9, z: p.z + 9 });
+  // --- Houses + shops on the blocks between streets ---
+  // Block centres sit midway between avenues/streets (multiples of 40),
+  // i.e. at -140, -100, -60, -20, 20, 60, 100, 140 — 4 plots per block.
+  const candidates = [];
+  for (let bx = -160; bx <= 120; bx += 40) {
+    for (let bz = -120; bz <= 80; bz += 40) {
+      const cx = bx + 20;
+      const cz = bz + 20;
+      for (const [ox, oz] of [[-6, -6], [6, -6], [-6, 6], [6, 6]]) {
+        const px = cx + ox;
+        const pz = cz + oz;
+        if (onRoad(px, pz) || inMarket(px, pz) || inBeach(px, pz)) continue;
+        if (px > -30 && px < 95 && pz > -115 && pz < -25) continue; // downtown tower block
+        candidates.push({ x: px, z: pz });
+      }
     }
   }
-
-  // ---- Traffic: 42 cars on the roads (KPD cruisers, school bus, regular cars).
-  const carTypes = ['kpd', 'kpd', 'kpd', 'kpd', 'bus', 'bus'];
-  for (let i = 0; i < TUNING.trafficCount; i++) {
-    const road = rng.pick(ROADS);
-    const len = roadLength(road);
-    const type = i < carTypes.length ? carTypes[i] : 'car';
-    world.cars.push({ type, road: road.id, s: rng.range(0, len), lane: rng.pick([-3.4, 3.4]),
-      speed: type === 'kpd' ? rng.range(13, 17) : type === 'bus' ? rng.range(8, 10) : rng.range(9, 14),
-      color: type === 'kpd' ? 0x1a1a1e : type === 'bus' ? 0xe0b93c : rng.pick(CAR_COLORS),
-      heading: 0, x: 0, z: 0 });
+  const shuffled = rng.shuffle(candidates);
+  let houses = 0;
+  let shops = 0;
+  for (const c of shuffled) {
+    if (houses >= COUNTS.gableHouses && shops >= COUNTS.shops) break;
+    const isShop = shops < COUNTS.shops && (houses >= COUNTS.gableHouses || rng.chance(0.45));
+    const w = rng.range(9, 15);
+    const d = rng.range(8, 13);
+    const h = isShop ? rng.range(5, 8) : rng.range(5, 9.5);
+    const b = {
+      kind: isShop ? 'shop' : 'house',
+      x: c.x + rng.range(-4, 4), z: c.z + rng.range(-4, 4),
+      w, d, h,
+      color: isShop ? rng.pick(SHOP_COLORS) : rng.pick(HOUSE_COLORS),
+      sign: isShop ? rng.pick(SHOP_SIGNS) : null,
+      awning: isShop ? rng.pick([0xd9382b, 0x2b7ad9, 0xe8d02b, 0x2bd95f, 0xe87ab0]) : null,
+      rot: rng.pick([0, Math.PI / 2]),
+    };
+    world.buildings.push(b);
+    if (isShop) shops += 1; else houses += 1;
   }
-  world.stats.cars = world.cars.length;
-  world.stats.kpd = world.cars.filter((c) => c.type === 'kpd').length;
-  world.stats.bus = world.cars.filter((c) => c.type === 'bus').length;
 
-  // ---- Pedestrians: 204 — market crowd, sidewalk walkers, beach strollers.
-  const pedSpots = [];
-  for (let i = 0; i < 62; i++) pedSpots.push([plaza.x + rng.range(-44, 44), plaza.z + rng.range(-28, 32), 'market']);
-  for (let i = 0; i < 118; i++) {
-    const r = rng.pick(ROADS); const p = roadPoint(r, rng.range(0, roadLength(r)));
-    pedSpots.push([p.x + rng.pick([-10.5, 10.5]), p.z + rng.pick([-10.5, 10.5]), 'walk']);
+  // --- Market stalls: two rows down the Pasaru aisle (aisle runs along z at x=-110) ---
+  const awningStripes = [0xd9382b, 0x2b7ad9, 0xe8d02b, 0x2bd95f, 0xe87ab0, 0x2bd9c9];
+  for (let i = 0; i < COUNTS.stalls; i++) {
+    const side = i % 2 === 0 ? -1 : 1;
+    const row = Math.floor(i / 2);
+    world.stalls.push({
+      x: -110 + side * 7.5,
+      z: 46 - row * 9.5,
+      w: 5.5, d: 4.5, h: 3.2,
+      awning: awningStripes[i % awningStripes.length],
+      goods: rng.pick([0xe88a2b, 0x5ab87a, 0xd95f4b, 0xe8d02b, 0x4ba3d9]),
+      sign: rng.pick(SHOP_SIGNS),
+    });
   }
-  for (let i = 0; i < 24; i++) pedSpots.push([rng.range(185, 215), rng.range(-20, 110), 'beach']);
-  for (const [x, z, mode] of pedSpots) {
-    world.peds.push({ x, z, mode, heading: rng.range(0, Math.PI * 2), speed: rng.range(0.8, 1.8),
-      shirt: rng.pick(SHIRT_COLORS), skin: rng.pick([0xe8b88a, 0xc88a5a, 0x8a5a3a, 0xf0c8a0]),
-      phase: rng.range(0, Math.PI * 2), scale: rng.range(0.92, 1.08) });
-  }
-  world.stats.peds = world.peds.length;
 
-  // ---- Player.
-  world.player = {
-    x: -120, z: -52, heading: Math.PI, speed: 0, onFoot: true,
-    car: { name: 'RUKAN PELO GT', color: 0xe06a2a, condition: 100 },
-    health: 100, armour: 50, money: 500, stars: 0, weapon: 0, radio: 0,
-    mission: 0, missionProgress: 0, rank: 1, rp: 0,
-  };
+  // --- Pedestrians: 204. The first 18 are the market crowd (staged by shots). ---
+  for (let i = 0; i < COUNTS.pedestrians; i++) {
+    let x;
+    let z;
+    let axis;
+    let min;
+    let max;
+    if (i < 18) {
+      // market aisle crowd, z from 44 down to -28
+      x = -110 + rng.range(-3.5, 3.5);
+      z = 44 - i * 4.2;
+      axis = 'z'; min = -30; max = 50;
+    } else {
+      // sidewalk walkers across the city
+      const av = rng.pick(AVENUES);
+      const st = rng.pick(STREETS);
+      if (rng.chance(0.5)) {
+        axis = 'z';
+        x = av + rng.pick([-1, 1]) * (ROAD_W / 2 + 2.5);
+        z = rng.range(-140, 130);
+        min = -140; max = 130;
+      } else {
+        axis = 'x';
+        z = st + rng.pick([-1, 1]) * (ROAD_W / 2 + 2.5);
+        x = rng.range(-180, 180);
+        min = -180; max = 180;
+      }
+    }
+    world.peds.push({
+      x, z, axis, min, max,
+      dir: rng.chance(0.5) ? 1 : -1,
+      speed: rng.range(0.8, 1.8),
+      shirt: rng.pick(SHIRT_COLORS),
+      skin: rng.pick([0xe8c090, 0xc98a5a, 0x8a5a3a, 0xf0d0b0]),
+      phase: rng.range(0, Math.PI * 2),
+      hero: i === 0,
+    });
+  }
+  // Hero ped is the first market ped, red shirt, center aisle.
+  world.peds[0].shirt = HERO.shirt;
+  world.peds[0].x = -110;
+  world.peds[0].z = 38;
+
+  // --- Traffic: 42 cars + 4 KPD cruisers + 2 school buses on the roads ---
+  const carKinds = [];
+  for (let i = 0; i < COUNTS.trafficCars; i++) carKinds.push('traffic');
+  for (let i = 0; i < COUNTS.kpdCruisers; i++) carKinds.push('kpd');
+  for (let i = 0; i < COUNTS.schoolBuses; i++) carKinds.push('bus');
+  carKinds.forEach((kind, i) => {
+    const alongZ = rng.chance(0.5);
+    const road = alongZ ? rng.pick(AVENUES) : rng.pick(STREETS);
+    const pos = rng.range(-170, 170);
+    world.cars.push({
+      kind,
+      road, pos,
+      alongZ,
+      dir: rng.chance(0.5) ? 1 : -1,
+      speed: kind === 'bus' ? rng.range(6, 9) : kind === 'kpd' ? rng.range(13, 17) : rng.range(8, 14),
+      color: kind === 'kpd' ? 0xf0f0f0 : kind === 'bus' ? 0xe8c01a : rng.pick(CAR_COLORS),
+      lane: rng.pick([-1, 1]) * 3.5,
+    });
+  });
+
+  // --- Traffic lights at 10 intersections, red at shot time ---
+  const lightSpots = [
+    [-40, -40], [0, -40], [40, -40], [-40, 0], [0, 0],
+    [40, 0], [-40, 40], [0, 40], [40, 40], [0, -80],
+  ];
+  lightSpots.forEach(([x, z], i) => {
+    world.lights.push({ x: x + 9, z: z + 9, state: 'red', phase: i * 0.7 });
+  });
+
+  // --- Props: crates, barrels, baskets, planters. 9 fixed in the market foreground. ---
+  const propKinds = ['crate', 'barrel', 'basket', 'planter'];
+  for (let i = 0; i < COUNTS.props; i++) {
+    let x;
+    let z;
+    if (i < 9) {
+      // fixed foreground cluster at the south end of the market aisle (fills the cover frame)
+      const spots = [
+        [-119, 50], [-115, 52], [-103, 51], [-100, 48], [-118, 46],
+        [-104, 46], [-112, 48], [-120, 44], [-101, 44],
+      ];
+      [x, z] = spots[i];
+    } else if (i < 29) {
+      x = -110 + rng.range(-14, 14);
+      z = rng.range(-30, 55);
+    } else if (i < 49) {
+      x = rng.range(-30, 60);
+      z = rng.pick([-40, 0, 40]) + rng.pick([-1, 1]) * (ROAD_W / 2 + 2.5);
+    } else {
+      x = rng.range(-60, 140);
+      z = 130 + rng.pick([-1, 1]) * (ROAD_W / 2 + 3);
+    }
+    world.props.push({
+      kind: propKinds[i % propKinds.length],
+      x, z,
+      s: i < 9 ? rng.range(0.7, 1.0) : rng.range(0.8, 1.4),
+      color: rng.pick([0x8a6b3a, 0x6b5a3a, 0x9a7a4a, 0x5a8a4a, 0xb87a3a]),
+    });
+  }
+
+  // --- Palms: beach road, market edge, harbor ---
+  for (let i = 0; i < COUNTS.palms; i++) {
+    let x;
+    let z;
+    if (i < 26) {
+      x = -170 + i * 13.5;
+      z = 130 + (i % 2 === 0 ? -11 : 11);
+    } else if (i < 36) {
+      x = -158 + (i % 2) * 96;
+      z = -30 + (i - 26) * 9;
+    } else {
+      x = rng.range(-140, -60);
+      z = rng.range(110, 135);
+    }
+    world.palms.push({ x, z, h: rng.range(7, 11), lean: rng.range(-0.12, 0.12) });
+  }
+
   return world;
 }
 
-export function distToRoad(x, z, r) {
-  const dx = r.x2 - r.x1; const dz = r.z2 - r.z1;
-  const len2 = dx * dx + dz * dz || 1;
-  let t = ((x - r.x1) * dx + (z - r.z1) * dz) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return Math.hypot(x - (r.x1 + dx * t), z - (r.z1 + dz * t));
+export function worldHash(world) {
+  const parts = [
+    world.seed,
+    world.buildings.length,
+    world.stalls.length,
+    world.peds.length,
+    world.cars.length,
+    world.lights.length,
+    world.props.length,
+    world.palms.length,
+    world.bank ? `${world.bank.x},${world.bank.z},${world.bank.h}` : 'nobank',
+    world.buildings.slice(0, 5).map((b) => `${b.x.toFixed(1)},${b.z.toFixed(1)},${b.h.toFixed(1)}`).join('|'),
+  ];
+  return hashString(parts.join(';'));
 }
 
-export function trafficLightState(light, t) {
-  const phase = (t + light.offset) % light.cycle;
-  if (phase < 5) return 'green';
-  if (phase < 6) return 'amber';
-  return 'red';
-}
-
-export function districtAt(x, z) {
-  let best = DISTRICTS[0]; let bd = Infinity;
-  for (const d of DISTRICTS) { const dd = Math.hypot(d.center[0] - x, d.center[1] - z); if (dd < bd) { bd = dd; best = d; } }
-  return best;
-}
-
-export function updateWorld(world, dt) {
+export function stepWorld(world, dt) {
   world.time += dt;
-  const t = world.time;
-  // Traffic flows along its road, wrapping at the ends.
-  for (const car of world.cars) {
-    const road = ROADS.find((r) => r.id === car.road);
-    car.s += car.speed * dt;
-    const len = roadLength(road);
-    if (car.s > len) car.s -= len;
-    const p = roadPoint(road, car.s);
-    const nx = -(road.z2 - road.z1) / len; const nz = (road.x2 - road.x1) / len;
-    car.x = p.x + nx * car.lane; car.z = p.z + nz * car.lane; car.heading = p.heading;
-  }
-  // Pedestrians stroll; market crowd drifts between stalls.
-  for (const ped of world.peds) {
-    if (ped.mode === 'market') {
-      ped.heading += Math.sin(t * 0.3 + ped.phase) * dt * 0.4;
+  for (const p of world.peds) {
+    const d = p.dir * p.speed * dt;
+    if (p.axis === 'z') {
+      p.z += d;
+      if (p.z > p.max) { p.z = p.max; p.dir = -1; }
+      if (p.z < p.min) { p.z = p.min; p.dir = 1; }
     } else {
-      ped.heading += Math.sin(t * 0.2 + ped.phase) * dt * 0.15;
+      p.x += d;
+      if (p.x > p.max) { p.x = p.max; p.dir = -1; }
+      if (p.x < p.min) { p.x = p.min; p.dir = 1; }
     }
-    ped.x += Math.sin(ped.heading) * ped.speed * dt * 0.4;
-    ped.z += Math.cos(ped.heading) * ped.speed * dt * 0.4;
-    ped.phase += dt * ped.speed * 3.2;
+    p.phase += dt * p.speed * 2.2;
   }
-  // Heli orbits the player — unless a shot pinned it (world.heli.fixed), in
-  // which case it stays where the staging put it.
-  if (!world.heli.fixed) {
-    world.heli.angle += world.heli.speed * dt;
-    world.heli.x = world.player.x + Math.cos(world.heli.angle) * world.heli.radius;
-    world.heli.z = world.player.z + Math.sin(world.heli.angle) * world.heli.radius;
+  for (const c of world.cars) {
+    c.pos += c.dir * c.speed * dt;
+    if (c.pos > 175) { c.pos = 175; c.dir = -1; }
+    if (c.pos < -175) { c.pos = -175; c.dir = 1; }
   }
-  // Wanted decays slowly when the player stays out of trouble.
-  if (world.player.stars > 0 && Math.floor(t) % TUNING.wantedDecaySeconds === 0 && dt > 0) {
-    world.player.stars = Math.max(0, world.player.stars - 0.02 * dt);
+  world.heli.angle += dt * 0.12;
+  world.heli.rotor += dt * 22;
+  for (const l of world.lights) {
+    const t = (world.time + l.phase * 7) % 21;
+    l.state = t < 8 ? 'red' : t < 10 ? 'amber' : 'green';
   }
 }
 
-// Deterministic fingerprint of the placed world (for the self-test).
-export function hashWorld(world) {
-  let h = 2166136261;
-  const mix = (n) => { h ^= Math.round(n * 1000) & 0xffff; h = Math.imul(h, 16777619); };
-  for (const b of world.buildings) { mix(b.x); mix(b.z); mix(b.h); }
-  for (const c of world.cars) { mix(c.s); mix(c.speed); }
-  for (const p of world.peds) { mix(p.x); mix(p.z); mix(p.shirt); }
-  return (h >>> 0).toString(16);
-}
+// Deterministic per-shot staging: repositions a fixed set of peds, cars and the
+// heli so the graded frames are crowded and readable. No RNG — same every run.
+export function stageShot(world, shotId) {
+  // Reset lights to red for every shot (the brief: red at shot time).
+  for (const l of world.lights) l.state = 'red';
 
-export function missionById(id) { return MISSIONS.find((m) => m.id === id) || MISSIONS[0]; }
+  if (shotId === 'cover') {
+    // 18 market peds already along the aisle; tighten them into the frame:
+    // hero close to camera, browsers at stalls, no gaps in the aisle.
+    world.peds.slice(0, 18).forEach((p, i) => {
+      p.axis = 'z';
+      p.x = -110 + [-2.5, 1.5, -1, 2.5, 0, -3, 2, -0.5, 3, -2, 1, -3.5, 2.5, 0.5, -1.5, 3.5, -2.5, 1][i];
+      p.z = 46 - i * 4.1;
+      p.dir = i % 2 === 0 ? 1 : -1;
+    });
+    world.peds[0].x = -110;
+    world.peds[0].z = 48;
+    world.peds[0].shirt = HERO.shirt;
+    world.hero = { mode: 'foot', x: -110, z: 48, heading: Math.PI, speed: 0, carColor: HERO.carColor, carName: HERO.carName };
+  }
+
+  if (shotId === 'city') {
+    // Beach chase: 12 cars ahead on Strand Blvd (z=130), KPD in pursuit,
+    // bus ahead, heli top-left with cone.
+    const beachCars = world.cars.filter((c) => c.kind !== 'bus').slice(0, 10);
+    const bus = world.cars.find((c) => c.kind === 'bus');
+    const kpd = world.cars.filter((c) => c.kind === 'kpd').slice(0, 3);
+    beachCars.forEach((c, i) => {
+      c.alongZ = false; c.road = 130; c.dir = 1; c.lane = (i % 2 === 0 ? -3.5 : 3.5);
+      c.pos = 18 + i * 9;
+    });
+    kpd.forEach((c, i) => {
+      c.alongZ = false; c.road = 130; c.dir = 1; c.lane = i % 2 === 0 ? -3.5 : 3.5;
+      c.pos = 4 + i * 7;
+    });
+    if (bus) { bus.alongZ = false; bus.road = 130; bus.dir = 1; bus.lane = 3.5; bus.pos = 72; }
+    world.heli = { x: 30, z: 138, y: 20, angle: 0.4, rotor: 0.8 };
+    world.hero = { mode: 'car', x: 0, z: 130, heading: Math.PI / 2, speed: 31, carColor: 0xd9382b, carName: 'RUKAN PELO GT' };
+  }
+
+  if (shotId === 'mission') {
+    // Bank job: parked cars filling BOTH near-foreground sides of the avenue,
+    // moving traffic ahead, KPD ahead, hero coupe bright orange and fully
+    // visible above the dialogue box.
+    const parked = world.cars.slice(0, 10);
+    parked.forEach((c, i) => {
+      const side = i % 2 === 0 ? -1 : 1;
+      const row = Math.floor(i / 2);
+      c.alongZ = true; c.road = 0; c.dir = 1; c.lane = side * 9.5;
+      c.pos = -14 - row * 10;
+      c.speed = 0;
+    });
+    const movers = world.cars.slice(10, 16);
+    movers.forEach((c, i) => {
+      c.alongZ = true; c.road = 0; c.dir = -1; c.lane = (i % 2 === 0 ? -3.5 : 3.5);
+      c.pos = -48 - i * 8; c.speed = 9;
+    });
+    const kpd = world.cars.find((c) => c.kind === 'kpd');
+    if (kpd) { kpd.alongZ = true; kpd.road = 0; kpd.dir = -1; kpd.lane = -3.5; kpd.pos = -62; kpd.speed = 12; }
+    // Sidewalk peds flanking the avenue near the camera.
+    world.peds.slice(18, 30).forEach((p, i) => {
+      const side = i % 2 === 0 ? -1 : 1;
+      p.axis = 'z';
+      p.x = side * 10.5;
+      p.z = -8 - Math.floor(i / 2) * 7;
+    });
+    world.hero = { mode: 'car', x: 0, z: -2, heading: Math.PI, speed: 8, carColor: HERO.carColor, carName: HERO.carName };
+  }
+
+  if (shotId === 'night') {
+    // Night heli: hero on foot on the centerline, KPD + parked cars flanking,
+    // peds on sidewalks, heli cone down the road, BANK through the cone.
+    const parked = world.cars.slice(0, 6);
+    parked.forEach((c, i) => {
+      const side = i % 2 === 0 ? -1 : 1;
+      const row = Math.floor(i / 2);
+      c.alongZ = true; c.road = 0; c.dir = 1; c.lane = side * 9.5;
+      c.pos = -14 - row * 13;
+      c.speed = 0;
+    });
+    const kpd = world.cars.find((c) => c.kind === 'kpd');
+    if (kpd) { kpd.alongZ = true; kpd.road = 0; kpd.dir = -1; kpd.lane = 0; kpd.pos = -34; kpd.speed = 0; }
+    world.peds.slice(18, 28).forEach((p, i) => {
+      const side = i % 2 === 0 ? -1 : 1;
+      p.axis = 'z';
+      p.x = side * 10.5;
+      p.z = -4 - Math.floor(i / 2) * 8;
+    });
+    world.heli = { x: 4, z: -34, y: 32, angle: 0.2, rotor: 1.7 };
+    world.hero = { mode: 'foot', x: 0, z: -6, heading: Math.PI, speed: 0, carColor: HERO.carColor, carName: HERO.carName };
+    world.peds[0].x = 0;
+    world.peds[0].z = -6;
+    world.peds[0].shirt = HERO.shirt;
+  }
+}

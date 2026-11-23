@@ -1,132 +1,121 @@
-// HUD: DOM overlay — mission card, KPD response, money/stars, weapons, crew,
-// district + minimap + health/armour, dialogue, speedometer, radio. No canvas text.
-import { DISTRICTS, MISSIONS, CREW, WEAPONS } from './config.js';
-import { districtAt } from './world.js';
+// Azura Bay HUD: DOM overlay on top of the WebGL canvas — mission card,
+// KPD response list, money + stars, weapon slots, crew cards, street minimap,
+// dialogue box, speedometer. Rank-1-style layout, no overlaps, no clipping.
+import { WEAPONS, CREW } from './config.js';
+import { wantedLabel } from './police.js';
 
-let els = null;
-let minimap = null;
+const AVENUES = [-160, -120, -80, -40, 0, 40, 80, 120, 160];
+const STREETS = [-120, -80, -40, 0, 40, 80, 120];
 
-export function initHud() {
-  els = {
-    missionName: document.getElementById('mission-name'),
-    missionStage: document.getElementById('mission-stage'),
-    missionObjective: document.getElementById('mission-objective'),
-    missionNext: document.getElementById('mission-next'),
-    missionBar: document.getElementById('mission-bar'),
-    kpdList: document.getElementById('kpd-list'),
-    kpdCount: document.getElementById('kpd-count'),
-    money: document.getElementById('money'),
-    stars: document.getElementById('stars'),
-    responding: document.getElementById('responding'),
-    rank: document.getElementById('rank'),
-    districtName: document.getElementById('district-name'),
-    districtSub: document.getElementById('district-sub'),
-    healthBar: document.getElementById('health-bar'),
-    armourBar: document.getElementById('armour-bar'),
-    healthNum: document.getElementById('health-num'),
-    armourNum: document.getElementById('armour-num'),
-    speaker: document.getElementById('dialogue-speaker'),
-    dialogue: document.getElementById('dialogue-text'),
-    vehicleName: document.getElementById('vehicle-name'),
-    vehicleCond: document.getElementById('vehicle-cond'),
-    speed: document.getElementById('speed'),
-    radio: document.getElementById('radio'),
-    hint: document.getElementById('hint'),
-    overlay: document.getElementById('overlay'),
+export function buildHUD() {
+  return {
+    missionTitle: document.getElementById('hud-mission-title'),
+    missionStage: document.getElementById('hud-mission-stage'),
+    missionObjective: document.getElementById('hud-mission-objective'),
+    missionNext: document.getElementById('hud-mission-next'),
+    missionBar: document.getElementById('hud-mission-bar'),
+    policeList: document.getElementById('hud-police-list'),
+    policeCount: document.getElementById('hud-police-count'),
+    money: document.getElementById('hud-money'),
+    stars: document.getElementById('hud-stars'),
+    wantedLabel: document.getElementById('hud-wanted-label'),
+    rank: document.getElementById('hud-rank'),
+    weapons: document.getElementById('hud-weapons'),
+    crew: document.getElementById('hud-crew'),
+    minimap: document.getElementById('hud-minimap'),
+    districtName: document.getElementById('hud-district-name'),
+    districtSub: document.getElementById('hud-district-sub'),
+    health: document.getElementById('hud-health'),
+    armour: document.getElementById('hud-armour'),
+    dialogueSpeaker: document.getElementById('hud-dialogue-speaker'),
+    dialogueText: document.getElementById('hud-dialogue-text'),
+    speedName: document.getElementById('hud-speed-name'),
+    speedValue: document.getElementById('hud-speed-value'),
+    speedMode: document.getElementById('hud-speed-mode'),
+    radio: document.getElementById('hud-radio'),
   };
-  minimap = document.getElementById('minimap');
-  // Weapon slots + crew cards are static content.
-  document.querySelectorAll('.weapon').forEach((el, i) => {
-    const w = WEAPONS[i];
-    el.querySelector('.w-slot').textContent = w.slot;
-    el.querySelector('.w-name').textContent = w.name;
-    el.querySelector('.w-ammo').textContent = w.ammo;
-  });
-  document.querySelectorAll('.crew').forEach((el, i) => {
-    const c = CREW[i];
-    el.querySelector('.c-name').textContent = c.name;
-    el.querySelector('.c-who').textContent = c.who;
-    el.querySelector('.c-key').textContent = c.key;
-  });
 }
 
-export function updateHud(world, policeRows, clockText) {
-  if (!els) return;
-  const p = world.player;
-  const m = MISSIONS[p.mission] || MISSIONS[0];
-  els.missionName.textContent = `MISSION ${m.id} · ${m.name}`;
-  els.missionStage.textContent = m.stage;
-  els.missionObjective.textContent = m.objective;
-  els.missionNext.textContent = `NEXT ${m.next}`;
-  els.missionBar.style.width = `${Math.min(100, p.missionProgress * 100)}%`;
-  els.kpdCount.textContent = `${policeRows.length} UNITS`;
-  els.kpdList.innerHTML = policeRows.map((r) =>
-    `<div class="kpd-row"><span>${r.name}</span><span class="kpd-status">${r.status}</span><span>${r.dist} m</span></div>`).join('');
-  els.money.textContent = `$${p.money.toLocaleString('en-US')}`;
-  els.stars.textContent = '★'.repeat(Math.round(p.stars)) + '☆'.repeat(Math.max(0, 5 - Math.round(p.stars)));
-  els.responding.textContent = p.stars >= 4 ? 'AIR UNIT DEPLOYED' : p.stars > 0 ? 'UNITS RESPONDING' : 'ALL QUIET';
-  els.rank.textContent = `RANK ${p.rank} ROOKIE ${p.rp.toLocaleString('en-US')} / 1,500 RP`;
-  const d = world.player.district
-    ? DISTRICTS.find((x) => x.id === world.player.district) || districtAt(p.x, p.z)
-    : districtAt(p.x, p.z);
-  els.districtName.textContent = d.name;
-  els.districtSub.textContent = d.sub;
-  els.healthBar.style.width = `${p.health}%`;
-  els.armourBar.style.width = `${p.armour}%`;
-  els.healthNum.textContent = `HEALTH ${Math.round(p.health)}`;
-  els.armourNum.textContent = `ARMOUR ${Math.round(p.armour)}`;
-  els.speaker.textContent = m.speaker;
-  els.dialogue.textContent = m.line;
-  els.vehicleName.textContent = p.onFoot ? 'ON FOOT' : p.car.name;
-  els.vehicleCond.textContent = p.onFoot ? '' : `${p.car.condition}% CONDITION`;
-  els.speed.textContent = p.onFoot ? '—' : String(Math.round(p.speed * 3.6));
-  els.radio.textContent = `♪ ${['Sol Mar FM — Island Pop', 'Kite FM — Lo-Fi Bay', 'Vice FM — Synthwave'][p.radio]}`;
-  drawMinimap(world);
+export function updateHUD(el, state) {
+  if (!el.missionTitle) return;
+  const m = state.mission;
+  el.missionTitle.textContent = `MISSION ${m.id} · ${m.name}`;
+  el.missionStage.textContent = `STAGE ${state.stage + 1}/${m.stages.length} · ${m.stages[state.stage]}`;
+  el.missionObjective.textContent = m.objective;
+  el.missionNext.textContent = `NEXT ${m.next}`;
+  el.missionBar.style.width = `${((state.stage + 1) / m.stages.length) * 100}%`;
+
+  el.policeCount.textContent = `${state.policeRows.length} UNITS`;
+  el.policeList.innerHTML = state.policeRows
+    .map((r) => `<div class="police-row"><span>${r.name}</span><span class="police-status">${r.status}</span><span class="police-dist">${r.distance} m</span></div>`)
+    .join('');
+
+  el.money.textContent = `$${state.money.toLocaleString('en-US')}`;
+  el.stars.textContent = '★'.repeat(state.wanted) + '☆'.repeat(5 - state.wanted);
+  el.wantedLabel.textContent = wantedLabel(state.police);
+  el.rank.textContent = 'RANK 1 ROOKIE 0 / 1,500 RP';
+
+  el.weapons.innerHTML = WEAPONS.map((w) => (
+    `<div class="weapon${w.slot === state.weapon ? ' active' : ''}"><div class="weapon-slot">${w.slot}</div><div class="weapon-name">${w.name}</div><div class="weapon-ammo">${w.ammo}</div></div>`
+  )).join('');
+
+  el.crew.innerHTML = CREW.map((c) => (
+    `<div class="crew-card"><div class="crew-name">${c.card}</div><div class="crew-role">${c.name} · ${c.role}</div><div class="crew-key">${c.key}</div></div>`
+  )).join('');
+
+  el.districtName.textContent = state.district.name;
+  el.districtSub.textContent = state.district.sub;
+  el.health.style.width = `${state.health}%`;
+  el.armour.style.width = `${state.armour}%`;
+
+  el.dialogueSpeaker.textContent = state.dialogue.speaker;
+  el.dialogueText.textContent = state.dialogue.text;
+
+  el.speedName.textContent = state.onFoot ? 'ON FOOT' : state.carName;
+  el.speedValue.textContent = String(Math.round(state.speedKmh));
+  el.speedMode.textContent = state.onFoot ? '' : '100% CONDITION';
+  el.radio.textContent = `♪ ${state.radio.name} — ${state.radio.genre}`;
+
+  drawMinimap(el.minimap, state);
 }
 
-function drawMinimap(world) {
-  if (!minimap) return;
-  const ctx = minimap.getContext('2d');
-  const W = minimap.width, H = minimap.height;
-  const S = W / 560;
-  const X = (x) => (x + 280) * S, Z = (z) => (z + 280) * S;
-  ctx.fillStyle = '#1c2733'; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = '#3a4a5a'; ctx.lineWidth = 1;
-  for (let i = 0; i <= 14; i++) {
-    ctx.beginPath(); ctx.moveTo(i * 40 * S, 0); ctx.lineTo(i * 40 * S, H); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0, i * 40 * S); ctx.lineTo(W, i * 40 * S); ctx.stroke();
+function drawMinimap(canvas, state) {
+  if (!canvas) return;
+  const g = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  const toX = (x) => ((x + 200) / 400) * W;
+  const toY = (z) => ((z + 200) / 400) * H;
+  g.fillStyle = '#14181f';
+  g.fillRect(0, 0, W, H);
+  // Sea on the right edge.
+  g.fillStyle = '#1c4a6b';
+  g.fillRect(toX(150), 0, W - toX(150), H);
+  // Streets.
+  g.strokeStyle = '#5a6270';
+  g.lineWidth = 2;
+  for (const ax of AVENUES) {
+    g.beginPath(); g.moveTo(toX(ax), 0); g.lineTo(toX(ax), H); g.stroke();
   }
-  ctx.strokeStyle = '#7a8a9a'; ctx.lineWidth = 3;
-  // Roads: drawn from the world data via the DOM-free road list.
-  const roads = window.__roads || [];
-  for (const r of roads) {
-    ctx.beginPath(); ctx.moveTo(X(r.x1), Z(r.z1)); ctx.lineTo(X(r.x2), Z(r.z2)); ctx.stroke();
+  for (const sz of STREETS) {
+    g.beginPath(); g.moveTo(0, toY(sz)); g.lineTo(W, toY(sz)); g.stroke();
   }
-  // Sea (east edge).
-  ctx.fillStyle = '#2a6a9a'; ctx.fillRect(X(210), 0, W - X(210), H);
   // Mission marker.
-  const m = MISSIONS[world.player.mission] || MISSIONS[0];
-  const md = DISTRICTS.find((d) => d.id === m.district) || DISTRICTS[0];
-  ctx.fillStyle = '#ffd83c';
-  ctx.beginPath(); ctx.arc(X(md.center[0]), Z(md.center[1]), 5, 0, Math.PI * 2); ctx.fill();
+  g.fillStyle = '#ffd92b';
+  g.beginPath(); g.arc(toX(state.target.x), toY(state.target.z), 4, 0, Math.PI * 2); g.fill();
   // Police dots.
-  ctx.fillStyle = '#ff4a4a';
-  for (const c of world.cars) {
-    if (c.type !== 'kpd') continue;
-    ctx.beginPath(); ctx.arc(X(c.x), Z(c.z), 3, 0, Math.PI * 2); ctx.fill();
+  g.fillStyle = '#ff4040';
+  for (const p of state.policeDots || []) {
+    g.beginPath(); g.arc(toX(p.x), toY(p.z), 2.5, 0, Math.PI * 2); g.fill();
   }
   // Player arrow.
-  const p = world.player;
-  ctx.save();
-  ctx.translate(X(p.x), Z(p.z)); ctx.rotate(-p.heading);
-  ctx.fillStyle = '#ffffff';
-  ctx.beginPath(); ctx.moveTo(0, -7); ctx.lineTo(5, 6); ctx.lineTo(-5, 6); ctx.closePath(); ctx.fill();
-  ctx.restore();
-}
-
-export function showOverlay(show, title, sub) {
-  if (!els) return;
-  els.overlay.style.display = show ? 'flex' : 'none';
-  if (title) document.getElementById('overlay-title').textContent = title;
-  if (sub) document.getElementById('overlay-sub').textContent = sub;
+  const px = toX(state.player.x);
+  const py = toY(state.player.z);
+  g.fillStyle = '#ffffff';
+  g.beginPath();
+  g.moveTo(px, py - 6); g.lineTo(px + 5, py + 5); g.lineTo(px - 5, py + 5); g.closePath();
+  g.fill();
+  g.strokeStyle = '#ffd92b';
+  g.lineWidth = 1.5;
+  g.beginPath(); g.arc(px, py, 8, 0, Math.PI * 2); g.stroke();
 }

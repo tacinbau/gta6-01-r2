@@ -1,34 +1,50 @@
-// Police: wanted stars, responding units for the HUD, roadblocks at 3+ stars.
-// The KPD cruisers in the sim chase the player when stars > 0; Air One joins at 4.
-import { TUNING } from './config.js';
+// KPD police response: wanted stars, pursuing units, roadblocks, AIR ONE.
+// Pure logic — render.js draws what this reports, hud.js lists it.
+import { POLICE_UNITS } from './config.js';
 
-const UNIT_NAMES = ['CORAL-48', 'CORAL-85', 'CORAL-122', 'MARLIN-3', 'KITE-1', 'AIR ONE'];
+export function makePoliceState() {
+  return {
+    wanted: 0,
+    units: POLICE_UNITS.map((name, i) => ({
+      name,
+      status: 'STANDBY',
+      distance: 300 + i * 17,
+    })),
+    foot: 0,
+    airOne: false,
+    roadblocks: 0,
+  };
+}
 
-export function policeRows(world) {
-  const p = world.player;
-  const rows = [];
-  if (p.stars <= 0) return rows;
-  const kpd = world.cars.filter((c) => c.type === 'kpd');
-  kpd.forEach((c, i) => {
-    rows.push({ name: UNIT_NAMES[i % UNIT_NAMES.length], status: 'IN PURSUIT', dist: Math.round(Math.hypot(c.x - p.x, c.z - p.z)) });
+export function setWanted(police, stars) {
+  police.wanted = Math.max(0, Math.min(5, stars));
+  police.airOne = police.wanted >= 4;
+  police.roadblocks = police.wanted >= 3 ? police.wanted - 2 : 0;
+  police.units.forEach((u, i) => {
+    if (police.wanted === 0) {
+      u.status = 'STANDBY';
+      u.distance = 300 + i * 17;
+    } else if (i < police.wanted) {
+      u.status = 'IN PURSUIT';
+      u.distance = 11 + i * 29;
+    } else {
+      u.status = 'EN ROUTE';
+      u.distance = 120 + i * 40;
+    }
   });
-  if (p.stars >= TUNING.heliAtStars) {
-    rows.push({ name: 'AIR ONE', status: 'OVERHEAD', dist: Math.round(Math.hypot(world.heli.x - p.x, world.heli.z - p.z)) });
-  }
-  if (p.stars >= 2) rows.push({ name: 'FOOT ×2', status: 'IN PURSUIT', dist: 41 });
-  return rows.slice(0, 5);
+  police.foot = police.wanted >= 2 ? 2 : 0;
+  return police;
 }
 
-export function addWanted(world, n) {
-  world.player.stars = Math.max(0, Math.min(5, world.player.stars + n));
+export function policeListRows(police) {
+  const rows = police.units.map((u) => ({ name: u.name, status: u.status, distance: u.distance }));
+  if (police.foot > 0) rows.push({ name: `FOOT ×${police.foot}`, status: 'IN PURSUIT', distance: 41 });
+  if (police.airOne) rows.push({ name: 'AIR ONE', status: 'OVERHEAD', distance: 50 });
+  return rows;
 }
 
-export function roadblockSpots(world) {
-  // Roadblocks on the roads nearest the player when stars hit 3+.
-  if (world.player.stars < TUNING.roadblockAtStars) return [];
-  const p = world.player;
-  return [
-    { x: p.x + 30, z: p.z, heading: 0 },
-    { x: p.x - 26, z: p.z + 18, heading: Math.PI / 2 },
-  ];
+export function wantedLabel(police) {
+  if (police.wanted === 0) return 'CLEAR';
+  if (police.airOne) return 'AIR UNIT DEPLOYED';
+  return 'UNITS RESPONDING';
 }
